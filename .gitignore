@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.context/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+*.local
+bun.lockb
