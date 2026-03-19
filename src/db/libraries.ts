@@ -54,9 +54,7 @@ export function createLibrary(
       now,
     ]
   );
-
-  // Index in FTS
-  syncFts(database, id);
+  // FTS is maintained by trigger
 
   return getLibraryById(id, database);
 }
@@ -101,25 +99,31 @@ export function searchLibraries(
   const database = db ?? getDatabase();
   const escaped = escapeFts(query);
 
-  const rows = database
-    .query<Record<string, unknown>, [string, number]>(
-      `SELECT l.* FROM libraries l
-       JOIN libraries_fts f ON l.id = f.library_id
-       WHERE libraries_fts MATCH ?
-       ORDER BY rank
-       LIMIT ?`
-    )
-    .all(escaped, limit);
+  let rows: Record<string, unknown>[] = [];
+  try {
+    rows = database
+      .query<Record<string, unknown>, [string, number]>(
+        `SELECT l.* FROM libraries l
+         JOIN libraries_fts_map m ON l.id = m.library_id
+         JOIN libraries_fts f ON f.rowid = m.rowid
+         WHERE libraries_fts MATCH ?
+         ORDER BY rank
+         LIMIT ?`
+      )
+      .all(escaped, limit);
+  } catch {
+    // FTS error fallback
+  }
 
   if (rows.length === 0) {
     // Fallback: LIKE search
     return database
-      .query<Record<string, unknown>, [string, string, number]>(
+      .query<Record<string, unknown>, [string, string, string, number]>(
         `SELECT * FROM libraries
          WHERE name LIKE ? OR slug LIKE ? OR npm_package LIKE ?
          ORDER BY name ASC LIMIT ?`
       )
-      .all(`%${query}%`, `%${query}%`, limit)
+      .all(`%${query}%`, `%${query}%`, `%${query}%`, limit)
       .map(rowToLibrary);
   }
 
@@ -153,33 +157,8 @@ export function updateLibraryVersion(
 
 export function deleteLibrary(id: string, db?: Database): void {
   const database = db ?? getDatabase();
-  // Cascades to documents and chunks via FK
+  // FK cascade deletes documents, chunks. Trigger handles FTS cleanup.
   database.run("DELETE FROM libraries WHERE id = ?", [id]);
-  database.run(
-    "DELETE FROM libraries_fts WHERE library_id = ?",
-    [id]
-  );
-}
-
-function syncFts(db: Database, libraryId: string): void {
-  const lib = db
-    .query<Record<string, unknown>, [string]>(
-      "SELECT * FROM libraries WHERE id = ?"
-    )
-    .get(libraryId);
-  if (!lib) return;
-
-  db.run("DELETE FROM libraries_fts WHERE library_id = ?", [libraryId]);
-  db.run(
-    "INSERT INTO libraries_fts (name, slug, description, npm_package, library_id) VALUES (?, ?, ?, ?, ?)",
-    [
-      (lib["name"] as string) ?? "",
-      (lib["slug"] as string) ?? "",
-      (lib["description"] as string) ?? "",
-      (lib["npm_package"] as string) ?? "",
-      libraryId,
-    ]
-  );
 }
 
 function escapeFts(query: string): string {

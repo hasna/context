@@ -8,17 +8,28 @@ import {
   deleteChunksForLibrary,
 } from "../db/chunks.js";
 import { discoverDocs } from "./exa.js";
-import { cleanText, splitIntoChunks, estimateTokens } from "./parser.js";
+import { discoverDocsFirecrawl } from "./firecrawl.js";
+import { cleanText, splitIntoChunks, deduplicateChunks, estimateTokens } from "./parser.js";
+import { saveDocumentVersion } from "../db/versions.js";
 import type { CrawlResult } from "../types/index.js";
+
+export type CrawlerType = "exa" | "firecrawl";
+
+export function getDefaultCrawler(): CrawlerType {
+  const env = process.env["CONTEXT_CRAWLER"];
+  if (env === "firecrawl") return "firecrawl";
+  return "exa";
+}
 
 export interface CrawlOptions {
   maxPages?: number;
   refresh?: boolean;
+  crawler?: CrawlerType;
 }
 
 /**
  * Crawl and index documentation for a library.
- * Discovers pages via Exa, parses content, stores chunks in SQLite.
+ * Uses Exa (default) or Firecrawl depending on options/env.
  */
 export async function crawlLibrary(
   libraryId: string,
@@ -27,6 +38,7 @@ export async function crawlLibrary(
 ): Promise<CrawlResult> {
   const database = db ?? getDatabase();
   const library = getLibraryById(libraryId, database);
+  const crawler = options.crawler ?? getDefaultCrawler();
 
   const result: CrawlResult = {
     library_id: libraryId,
@@ -41,16 +53,26 @@ export async function crawlLibrary(
 
   let pages;
   try {
-    pages = await discoverDocs({
-      name: library.name,
-      npm_package: library.npm_package,
-      docs_url: library.docs_url,
-      github_repo: library.github_repo,
-      maxPages: options.maxPages ?? 30,
-    });
+    if (crawler === "firecrawl") {
+      pages = await discoverDocsFirecrawl({
+        name: library.name,
+        npm_package: library.npm_package,
+        docs_url: library.docs_url,
+        github_repo: library.github_repo,
+        maxPages: options.maxPages ?? 30,
+      });
+    } else {
+      pages = await discoverDocs({
+        name: library.name,
+        npm_package: library.npm_package,
+        docs_url: library.docs_url,
+        github_repo: library.github_repo,
+        maxPages: options.maxPages ?? 30,
+      });
+    }
   } catch (err) {
     result.errors.push(
-      `Failed to discover docs: ${err instanceof Error ? err.message : String(err)}`
+      `Failed to discover docs (${crawler}): ${err instanceof Error ? err.message : String(err)}`
     );
     return result;
   }
@@ -70,10 +92,21 @@ export async function crawlLibrary(
         database
       );
 
-      // Re-index chunks for this document
+      // Save version history (only if content changed)
+      saveDocumentVersion(
+        {
+          document_id: doc.id,
+          url: page.url,
+          title: page.title ?? undefined,
+          content: cleaned,
+        },
+        database
+      );
+
       deleteChunksForDocument(doc.id, database);
 
-      const chunks = splitIntoChunks(cleaned);
+      const rawChunks = splitIntoChunks(cleaned);
+      const chunks = deduplicateChunks(rawChunks, 0.85);
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         if (!chunk) continue;
