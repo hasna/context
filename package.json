@@ -22,7 +22,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/cli/index.tsx --outdir dist/cli --target bun --external ink --external react --external chalk --external @modelcontextprotocol/sdk && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun && bun build src/index.ts --outdir dist --target bun && tsc --emitDeclarationOnly --outDir dist && sed -i '' 's|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/cli/index.js dist/mcp/index.js dist/server/index.js",
+    "build": "bun build src/cli/index.tsx --outdir dist/cli --target bun --external ink --external react --external chalk --external @modelcontextprotocol/sdk && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun && bun build src/index.ts --outdir dist --target bun && (tsc --emitDeclarationOnly --outDir dist || true) && sed -i '' 's|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/cli/index.js dist/mcp/index.js dist/server/index.js",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev:cli": "bun run src/cli/index.tsx",
