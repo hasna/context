@@ -287,6 +287,21 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 7,
+    name: "feedback",
+    sql: `
+      CREATE TABLE IF NOT EXISTS feedback (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        message TEXT NOT NULL,
+        email TEXT,
+        category TEXT DEFAULT 'general',
+        version TEXT,
+        machine_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `,
+  },
 ];
 
 function runMigrations(db: Database): void {
