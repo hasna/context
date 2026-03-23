@@ -1,11 +1,34 @@
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "fs";
 import { dirname, join } from "path";
 import { homedir } from "os";
 
 let _db: Database | null = null;
 
+export function getDataDir(): string {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
+  const newDir = join(home, ".hasna", "context");
+  const oldDir = join(home, ".context");
+
+  // Auto-migrate old dir to new location
+  if (existsSync(oldDir) && !existsSync(newDir)) {
+    mkdirSync(newDir, { recursive: true });
+    for (const file of readdirSync(oldDir)) {
+      const oldPath = join(oldDir, file);
+      if (statSync(oldPath).isFile()) {
+        copyFileSync(oldPath, join(newDir, file));
+      }
+    }
+  }
+
+  mkdirSync(newDir, { recursive: true });
+  return newDir;
+}
+
 function resolveDbPath(): string {
+  if (process.env["HASNA_CONTEXT_DB_PATH"]) {
+    return process.env["HASNA_CONTEXT_DB_PATH"];
+  }
   if (process.env["CONTEXT_DB_PATH"]) {
     return process.env["CONTEXT_DB_PATH"];
   }
@@ -20,8 +43,8 @@ function resolveDbPath(): string {
     dir = parent;
   }
 
-  // Default: ~/.context/context.db
-  return join(homedir(), ".context", "context.db");
+  // Default: ~/.hasna/context/context.db
+  return join(getDataDir(), "context.db");
 }
 
 export function getDatabase(): Database {
