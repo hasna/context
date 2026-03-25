@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { registerCloudTools } from "@hasna/cloud";
 import { z } from "zod";
 import { createRequire } from "module";
 import {
@@ -558,4 +559,5 @@ server.tool("list_agents", "List all registered agents.", {}, async () => {
 });
 
 const transport = new StdioServerTransport();
+registerCloudTools(server, "context");
 await server.connect(transport);
