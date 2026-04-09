@@ -1,6 +1,6 @@
 {
   "name": "@hasna/context",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Self-hosted documentation context server for AI coding agents — crawl, index, and query library docs via MCP + CLI + HTTP",
   "type": "module",
   "main": "dist/index.js",
