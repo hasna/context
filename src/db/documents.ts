@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { Database } from "bun:sqlite";
+import type { SqliteAdapter } from "@hasna/cloud";
 import { getDatabase } from "./database.js";
 import type { Document } from "../types/index.js";
 
@@ -22,16 +22,16 @@ export function upsertDocument(
     title?: string;
     content?: string;
   },
-  db?: Database
+  db?: SqliteAdapter
 ): Document {
   const database = db ?? getDatabase();
   const now = new Date().toISOString();
 
-  const existing = database
-    .query<Record<string, unknown>, [string, string]>(
-      "SELECT * FROM documents WHERE library_id = ? AND url = ?"
-    )
-    .get(input.library_id, input.url);
+  const existing = database.get(
+    "SELECT * FROM documents WHERE library_id = ? AND url = ?",
+    input.library_id,
+    input.url
+  ) as Record<string, unknown> | null;
 
   if (existing) {
     database.run(
@@ -64,30 +64,27 @@ export function upsertDocument(
   return getDocumentById(id, database);
 }
 
-export function getDocumentById(id: string, db?: Database): Document {
+export function getDocumentById(id: string, db?: SqliteAdapter): Document {
   const database = db ?? getDatabase();
-  const row = database
-    .query<Record<string, unknown>, [string]>(
-      "SELECT * FROM documents WHERE id = ?"
-    )
-    .get(id);
+  const row = database.get(
+    "SELECT * FROM documents WHERE id = ?",
+    id
+  ) as Record<string, unknown> | null;
   if (!row) throw new Error(`Document not found: ${id}`);
   return rowToDocument(row);
 }
 
-export function listDocuments(libraryId: string, db?: Database): Document[] {
+export function listDocuments(libraryId: string, db?: SqliteAdapter): Document[] {
   const database = db ?? getDatabase();
-  return database
-    .query<Record<string, unknown>, [string]>(
-      "SELECT * FROM documents WHERE library_id = ? ORDER BY created_at ASC"
-    )
-    .all(libraryId)
-    .map(rowToDocument);
+  return (database.all(
+    "SELECT * FROM documents WHERE library_id = ? ORDER BY created_at ASC",
+    libraryId
+  ) as Record<string, unknown>[]).map(rowToDocument);
 }
 
 export function deleteDocumentsForLibrary(
   libraryId: string,
-  db?: Database
+  db?: SqliteAdapter
 ): void {
   const database = db ?? getDatabase();
   database.run("DELETE FROM documents WHERE library_id = ?", [libraryId]);

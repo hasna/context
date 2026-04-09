@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { Database } from "bun:sqlite";
+import type { SqliteAdapter } from "@hasna/cloud";
 import { getDatabase } from "./database.js";
 
 export type LinkType =
@@ -29,7 +29,7 @@ export function addLink(
     type: LinkType;
     label?: string;
   },
-  db?: Database
+  db?: SqliteAdapter
 ): LibraryLink {
   const database = db ?? getDatabase();
   const id = randomUUID();
@@ -42,11 +42,11 @@ export function addLink(
   );
 
   return (
-    database
-      .query<LibraryLink, [string, string]>(
-        "SELECT * FROM library_links WHERE library_id = ? AND url = ?"
-      )
-      .get(input.library_id, input.url) ?? {
+    database.get(
+      "SELECT * FROM library_links WHERE library_id = ? AND url = ?",
+      input.library_id,
+      input.url
+    ) as LibraryLink | null ?? {
       id,
       library_id: input.library_id,
       url: input.url,
@@ -57,16 +57,15 @@ export function addLink(
   );
 }
 
-export function getLinks(libraryId: string, db?: Database): LibraryLink[] {
+export function getLinks(libraryId: string, db?: SqliteAdapter): LibraryLink[] {
   const database = db ?? getDatabase();
-  return database
-    .query<LibraryLink, [string]>(
-      "SELECT * FROM library_links WHERE library_id = ? ORDER BY type ASC"
-    )
-    .all(libraryId);
+  return database.all(
+    "SELECT * FROM library_links WHERE library_id = ? ORDER BY type ASC",
+    libraryId
+  ) as LibraryLink[];
 }
 
-export function deleteLink(id: string, db?: Database): void {
+export function deleteLink(id: string, db?: SqliteAdapter): void {
   const database = db ?? getDatabase();
   database.run("DELETE FROM library_links WHERE id = ?", [id]);
 }
@@ -74,7 +73,7 @@ export function deleteLink(id: string, db?: Database): void {
 export function syncLinks(
   libraryId: string,
   links: Array<{ type: LinkType; url: string; label?: string }>,
-  db?: Database
+  db?: SqliteAdapter
 ): void {
   const database = db ?? getDatabase();
   for (const link of links) {

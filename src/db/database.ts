@@ -302,6 +302,169 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 8,
+    name: "code_context",
+    sql: `
+      CREATE TABLE IF NOT EXISTS contexts (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        type TEXT NOT NULL CHECK(type IN ('repository', 'folder', 'project', 'workspace')),
+        description TEXT,
+        parent_context_id TEXT REFERENCES contexts(id) ON DELETE SET NULL,
+        language TEXT,
+        last_indexed_at TEXT,
+        file_count INTEGER DEFAULT 0,
+        entity_count INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_contexts_path ON contexts(path);
+      CREATE INDEX IF NOT EXISTS idx_contexts_type ON contexts(type);
+      CREATE INDEX IF NOT EXISTS idx_contexts_parent ON contexts(parent_context_id);
+      CREATE INDEX IF NOT EXISTS idx_contexts_language ON contexts(language);
+
+      CREATE TABLE IF NOT EXISTS context_items (
+        id TEXT PRIMARY KEY,
+        context_id TEXT NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        name TEXT NOT NULL,
+        item_type TEXT NOT NULL CHECK(item_type IN ('file', 'directory')),
+        parent_path TEXT,
+        extension TEXT,
+        content_hash TEXT,
+        content TEXT,
+        size_bytes INTEGER DEFAULT 0,
+        line_count INTEGER DEFAULT 0,
+        last_modified TEXT,
+        last_analyzed TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(context_id, path)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_context_items_context ON context_items(context_id);
+      CREATE INDEX IF NOT EXISTS idx_context_items_path ON context_items(path);
+      CREATE INDEX IF NOT EXISTS idx_context_items_parent ON context_items(parent_path);
+      CREATE INDEX IF NOT EXISTS idx_context_items_extension ON context_items(extension);
+      CREATE INDEX IF NOT EXISTS idx_context_items_hash ON context_items(content_hash);
+      CREATE INDEX IF NOT EXISTS idx_context_items_type ON context_items(item_type);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS context_items_fts USING fts5(
+        path,
+        name,
+        content,
+        tokenize='porter ascii'
+      );
+
+      CREATE TABLE IF NOT EXISTS context_items_fts_map (
+        rowid INTEGER PRIMARY KEY,
+        item_id TEXT NOT NULL UNIQUE
+      );
+
+      CREATE TRIGGER IF NOT EXISTS context_items_ai AFTER INSERT ON context_items WHEN new.item_type = 'file' BEGIN
+        INSERT INTO context_items_fts(path, name, content)
+        VALUES (new.path, new.name, COALESCE(new.content, ''));
+        INSERT INTO context_items_fts_map(rowid, item_id)
+        VALUES (last_insert_rowid(), new.id);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS context_items_au AFTER UPDATE ON context_items WHEN new.item_type = 'file' BEGIN
+        UPDATE context_items_fts SET
+          path = new.path,
+          name = new.name,
+          content = COALESCE(new.content, '')
+        WHERE rowid = (SELECT rowid FROM context_items_fts_map WHERE item_id = old.id);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS context_items_ad AFTER DELETE ON context_items WHEN old.item_type = 'file' BEGIN
+        DELETE FROM context_items_fts WHERE rowid = (
+          SELECT rowid FROM context_items_fts_map WHERE item_id = old.id
+        );
+        DELETE FROM context_items_fts_map WHERE item_id = old.id;
+      END;
+
+      CREATE TABLE IF NOT EXISTS code_entities (
+        id TEXT PRIMARY KEY,
+        context_id TEXT NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL REFERENCES context_items(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        signature TEXT,
+        start_line INTEGER NOT NULL,
+        end_line INTEGER NOT NULL,
+        visibility TEXT DEFAULT 'public',
+        metadata TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        UNIQUE(item_id, name, type)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_code_entities_context ON code_entities(context_id);
+      CREATE INDEX IF NOT EXISTS idx_code_entities_item ON code_entities(item_id);
+      CREATE INDEX IF NOT EXISTS idx_code_entities_name ON code_entities(name);
+      CREATE INDEX IF NOT EXISTS idx_code_entities_type ON code_entities(type);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS code_entities_fts USING fts5(
+        name,
+        signature,
+        tokenize='porter ascii'
+      );
+
+      CREATE TABLE IF NOT EXISTS code_entities_fts_map (
+        rowid INTEGER PRIMARY KEY,
+        entity_id TEXT NOT NULL UNIQUE
+      );
+
+      CREATE TRIGGER IF NOT EXISTS code_entities_ai AFTER INSERT ON code_entities BEGIN
+        INSERT INTO code_entities_fts(name, signature)
+        VALUES (new.name, COALESCE(new.signature, ''));
+        INSERT INTO code_entities_fts_map(rowid, entity_id)
+        VALUES (last_insert_rowid(), new.id);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS code_entities_ad AFTER DELETE ON code_entities BEGIN
+        DELETE FROM code_entities_fts WHERE rowid = (
+          SELECT rowid FROM code_entities_fts_map WHERE entity_id = old.id
+        );
+        DELETE FROM code_entities_fts_map WHERE entity_id = old.id;
+      END;
+
+      CREATE TABLE IF NOT EXISTS code_relations (
+        id TEXT PRIMARY KEY,
+        context_id TEXT NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+        source_item_id TEXT NOT NULL REFERENCES context_items(id) ON DELETE CASCADE,
+        target_item_id TEXT REFERENCES context_items(id) ON DELETE CASCADE,
+        source_entity_id TEXT REFERENCES code_entities(id) ON DELETE CASCADE,
+        target_entity_id TEXT REFERENCES code_entities(id) ON DELETE CASCADE,
+        relation_type TEXT NOT NULL,
+        relation_text TEXT,
+        confidence REAL DEFAULT 1.0,
+        created_at TEXT NOT NULL,
+        UNIQUE(source_entity_id, target_entity_id, relation_type)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_code_relations_context ON code_relations(context_id);
+      CREATE INDEX IF NOT EXISTS idx_code_relations_source_item ON code_relations(source_item_id);
+      CREATE INDEX IF NOT EXISTS idx_code_relations_target_item ON code_relations(target_item_id);
+      CREATE INDEX IF NOT EXISTS idx_code_relations_source_entity ON code_relations(source_entity_id);
+      CREATE INDEX IF NOT EXISTS idx_code_relations_target_entity ON code_relations(target_entity_id);
+      CREATE INDEX IF NOT EXISTS idx_code_relations_type ON code_relations(relation_type);
+
+      CREATE TABLE IF NOT EXISTS context_watches (
+        id TEXT PRIMARY KEY,
+        context_id TEXT NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        active INTEGER DEFAULT 1,
+        created_at TEXT NOT NULL,
+        UNIQUE(context_id, path)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_context_watches_context ON context_watches(context_id);
+      CREATE INDEX IF NOT EXISTS idx_context_watches_active ON context_watches(active);
+    `,
+  },
 ];
 
 function runMigrations(db: Database): void {
@@ -314,21 +477,62 @@ function runMigrations(db: Database): void {
   `);
 
   const applied = new Set(
-    db
-      .query<{ version: number }, []>("SELECT version FROM _schema_version")
-      .all()
-      .map((r) => r.version)
-  );
+  db
+    .all("SELECT version FROM _schema_version")
+    .map((r) => (r as { version: number }).version)
+);
 
   for (const migration of migrations) {
     if (applied.has(migration.version)) continue;
 
-    db.transaction(() => {
-      db.exec(migration.sql);
+    try {
+      // Split SQL intelligently to handle BEGIN...END blocks (triggers)
+      const statements: string[] = [];
+      const lines = migration.sql.split('\n');
+      let currentStmt = '';
+      let inBlock = false;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+
+        // Skip empty lines and comments
+        if (!trimmed || trimmed.startsWith('--')) continue;
+
+        currentStmt += line + '\n';
+
+        if (!inBlock && trimmed.startsWith('CREATE')) {
+          // Start of a new statement
+          if (trimmed.includes('BEGIN')) {
+            inBlock = true;
+          }
+        }
+
+        if (inBlock && trimmed === 'END;') {
+          // End of a block
+          inBlock = false;
+          statements.push(currentStmt.trim());
+          currentStmt = '';
+        } else if (!inBlock && trimmed.endsWith(';') && !trimmed.includes('BEGIN')) {
+          // End of a simple statement
+          statements.push(currentStmt.trim());
+          currentStmt = '';
+        }
+      }
+
+      // Execute each statement
+      for (const stmt of statements) {
+        if (stmt.length > 0) {
+          db.exec(stmt);
+        }
+      }
+
       db.run(
         "INSERT INTO _schema_version (version, name, applied_at) VALUES (?, ?, ?)",
         [migration.version, migration.name, new Date().toISOString()]
       );
-    })();
+    } catch (err) {
+      console.error(`Migration ${migration.version} (${migration.name}) failed: ${err}`);
+      throw err;
+    }
   }
 }

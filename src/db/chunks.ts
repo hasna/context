@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { Database } from "bun:sqlite";
+import type { SqliteAdapter as Database } from "@hasna/cloud";
 import { getDatabase } from "./database.js";
 import type { Chunk, SearchResult } from "../types/index.js";
 
@@ -45,11 +45,7 @@ export function insertChunk(
   // FTS is maintained by trigger
 
   return rowToChunk(
-    database
-      .query<Record<string, unknown>, [string]>(
-        "SELECT * FROM chunks WHERE id = ?"
-      )
-      .get(id)!
+    database.get("SELECT * FROM chunks WHERE id = ?", id) as Record<string, unknown>
   );
 }
 
@@ -124,21 +120,15 @@ export function searchChunks(
   }
 
   try {
-    return database
-      .query<
-        {
-          chunk_id: string;
-          library_id: string;
-          document_id: string;
-          content: string;
-          url: string | null;
-          title: string | null;
-          score: number;
-        },
-        (string | number)[]
-      >(sql)
-      .all(...params)
-      .map((r) => ({
+    return (database.all(sql, ...params) as {
+      chunk_id: string;
+      library_id: string;
+      document_id: string;
+      content: string;
+      url: string | null;
+      title: string | null;
+      score: number;
+    }[]).map((r) => ({
         chunk_id: r.chunk_id,
         library_id: r.library_id,
         document_id: r.document_id,
@@ -154,11 +144,10 @@ export function searchChunks(
 
 export function countChunks(libraryId: string, db?: Database): number {
   const database = db ?? getDatabase();
-  const row = database
-    .query<{ count: number }, [string]>(
-      "SELECT COUNT(*) AS count FROM chunks WHERE library_id = ?"
-    )
-    .get(libraryId);
+  const row = database.get(
+    "SELECT COUNT(*) AS count FROM chunks WHERE library_id = ?",
+    libraryId
+  ) as { count: number } | null;
   return row?.count ?? 0;
 }
 

@@ -2,30 +2,32 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { createRequire } from "module";
+import { join } from "path";
 import {
-  createLibrary,
   listLibraries,
-  searchLibraries,
   getLibraryBySlug,
-  deleteLibrary,
 } from "../db/libraries.js";
-import { searchChunks } from "../db/chunks.js";
-import { crawlLibrary, getDefaultCrawler } from "../crawler/index.js";
-import type { CrawlerType } from "../crawler/index.js";
+import { getDefaultCrawler } from "../crawler/index.js";
 import { getDbPath } from "../db/database.js";
-import { getLinks, addLink, syncLinks } from "../db/links.js";
-import type { LinkType } from "../db/links.js";
-import { getRelatedNodes, listNodes, searchNodes, upsertNode } from "../db/kg.js";
-import { getDocumentVersions } from "../db/versions.js";
-import { listDocuments } from "../db/documents.js";
+import { getRelatedNodes, listNodes, searchNodes } from "../db/kg.js";
 import {
   getEmbeddingConfig,
-  embedText,
-  saveEmbedding,
-  embeddingCoverage,
-  semanticSearch,
 } from "../db/embeddings.js";
-import { SEED_LIBRARIES } from "../seeds/libraries.js";
+import {
+  indexRepository,
+  refreshRepository,
+} from "../indexer/index.js";
+import {
+  listContexts,
+  getContextByPath,
+  getRelevantContext,
+  getRelatedItems,
+  getCodeEntitiesByItem,
+  searchContextItems,
+  searchCodeEntities,
+} from "../db/repositories.js";
+import { registerLibraryCommands } from "./library-commands.js";
+import { formatDate } from "./format.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
@@ -34,524 +36,7 @@ const program = new Command()
   .name("context")
   .description("Self-hosted documentation context server for AI coding agents")
   .version(pkg.version);
-
-// ─── context add ──────────────────────────────────────────────────────────────
-
-program
-  .command("add <name>")
-  .description("Index a library by crawling its documentation")
-  .option("-n, --npm <package>", "npm package name")
-  .option("-u, --url <url>", "official docs URL")
-  .option("-g, --github <repo>", "GitHub repo (e.g. facebook/react)")
-  .option("-d, --description <text>", "library description")
-  .option("-p, --pages <n>", "max pages to crawl", "30")
-  .option(
-    "-c, --crawler <type>",
-    "crawler to use: exa|firecrawl",
-    getDefaultCrawler()
-  )
-  .option("--no-crawl", "register library without crawling docs")
-  .action(
-    async (
-      name: string,
-      opts: {
-        npm?: string;
-        url?: string;
-        github?: string;
-        description?: string;
-        pages?: string;
-        crawler?: string;
-        crawl?: boolean;
-      }
-    ) => {
-      // Check duplicate
-      try {
-        const existing = searchLibraries(name, 1);
-        if (
-          existing.length > 0 &&
-          existing[0] &&
-          existing[0].name.toLowerCase() === name.toLowerCase()
-        ) {
-          console.log(
-            chalk.yellow(`Library "${name}" already indexed as /context/${existing[0].slug}`)
-          );
-          console.log(chalk.gray(`Use 'context refresh ${existing[0].slug}' to re-crawl.`));
-          process.exit(0);
-        }
-      } catch {
-        // Not found, proceed
-      }
-
-      const library = createLibrary({
-        name,
-        npm_package: opts.npm,
-        docs_url: opts.url,
-        github_repo: opts.github,
-        description: opts.description,
-      });
-
-      console.log(chalk.bold(`\nIndexing ${name}...`));
-      console.log(chalk.gray(`  ID: /context/${library.slug}`));
-
-      if (opts.crawl === false) {
-        console.log(chalk.green(`✓ Registered ${chalk.bold(name)} (no crawl)`));
-        return;
-      }
-
-      const crawler = (opts.crawler ?? getDefaultCrawler()) as CrawlerType;
-      console.log(chalk.gray(`  Crawler: ${crawler}`));
-
-      const maxPages = parseInt(opts.pages ?? "30", 10);
-      const result = await crawlLibrary(library.id, { maxPages, crawler });
-
-      console.log(
-        chalk.green(`\n✓ Indexed ${chalk.bold(name)}`) +
-          chalk.gray(` — ${result.pages_crawled} pages, ${result.chunks_indexed} chunks`)
-      );
-      console.log(chalk.cyan(`  Library ID: /context/${library.slug}`));
-
-      if (result.errors.length > 0) {
-        console.log(chalk.yellow(`\nWarnings (${result.errors.length}):`));
-        result.errors.slice(0, 3).forEach((e) => console.log(chalk.gray(`  ${e}`)));
-      }
-    }
-  );
-
-// ─── context seed ─────────────────────────────────────────────────────────────
-
-program
-  .command("seed")
-  .description("Populate the database with metadata for popular tools/services (no crawling)")
-  .option("--crawl", "Also crawl docs for each library after seeding")
-  .option("-p, --pages <n>", "max pages per library when --crawl is set", "10")
-  .option(
-    "-c, --crawler <type>",
-    "crawler to use: exa|firecrawl",
-    getDefaultCrawler()
-  )
-  .action(
-    async (opts: { crawl?: boolean; pages?: string; crawler?: string }) => {
-      console.log(chalk.bold(`\nSeeding ${SEED_LIBRARIES.length} libraries...\n`));
-      let added = 0;
-      let skipped = 0;
-
-      for (const seed of SEED_LIBRARIES) {
-        try {
-          const existing = searchLibraries(seed.name, 1);
-          if (
-            existing.length > 0 &&
-            existing[0] &&
-            (existing[0].slug === seed.slug || existing[0].name.toLowerCase() === seed.name.toLowerCase())
-          ) {
-            skipped++;
-            continue;
-          }
-
-          const library = createLibrary({
-            name: seed.name,
-            slug: seed.slug,
-            description: seed.description,
-            npm_package: seed.npm_package,
-            github_repo: seed.github_repo,
-            docs_url: seed.docs_url,
-          });
-
-          // Sync links
-          if (seed.links) {
-            syncLinks(
-              library.id,
-              seed.links.map((l) => ({
-                type: l.type as LinkType,
-                url: l.url,
-                label: l.label,
-              }))
-            );
-          }
-
-          // Create KG node
-          upsertNode({
-            type: "library",
-            name: seed.name,
-            description: seed.description,
-            library_id: library.id,
-            metadata: { slug: seed.slug, tags: seed.tags },
-          });
-
-          added++;
-          process.stdout.write(chalk.green(`  + ${seed.name}\n`));
-
-          if (opts.crawl) {
-            const crawler = (opts.crawler ?? getDefaultCrawler()) as CrawlerType;
-            const maxPages = parseInt(opts.pages ?? "10", 10);
-            const result = await crawlLibrary(library.id, { maxPages, crawler });
-            process.stdout.write(
-              chalk.gray(
-                `    → ${result.pages_crawled} pages, ${result.chunks_indexed} chunks\n`
-              )
-            );
-          }
-        } catch (err) {
-          console.log(chalk.red(`  ✗ ${seed.name}: ${err instanceof Error ? err.message : String(err)}`));
-        }
-      }
-
-      console.log(
-        `\n${chalk.green(`✓ Seeded ${added} libraries`)}${skipped > 0 ? chalk.gray(` (${skipped} already existed)`) : ""}`
-      );
-    }
-  );
-
-// ─── context list ─────────────────────────────────────────────────────────────
-
-program
-  .command("list")
-  .description("List all indexed libraries")
-  .option("--json", "Output as JSON")
-  .action((opts: { json?: boolean }) => {
-    const libraries = listLibraries();
-
-    if (opts.json) {
-      console.log(JSON.stringify(libraries, null, 2));
-      return;
-    }
-
-    if (libraries.length === 0) {
-      console.log(chalk.gray("No libraries indexed yet."));
-      console.log(chalk.gray("Run: context add <name>  or  context seed"));
-      return;
-    }
-
-    console.log(chalk.bold(`\n${libraries.length} librar${libraries.length === 1 ? "y" : "ies"}:\n`));
-    for (const lib of libraries) {
-      const id = chalk.cyan(`/context/${lib.slug}`);
-      const name = chalk.bold(lib.name);
-      const version = lib.version ? chalk.gray(` v${lib.version}`) : "";
-      const crawled = lib.chunk_count > 0
-        ? chalk.gray(` (${lib.chunk_count} chunks)`)
-        : chalk.yellow(" (not crawled)");
-      console.log(`  ${id}  ${name}${version}${crawled}`);
-      if (lib.description) console.log(`    ${chalk.gray(lib.description)}`);
-    }
-    console.log();
-  });
-
-// ─── context search ───────────────────────────────────────────────────────────
-
-program
-  .command("search <query>")
-  .description("Search docs across indexed libraries (FTS5 + optional semantic)")
-  .option("-l, --library <slug>", "Limit to a specific library")
-  .option("-n, --limit <n>", "Max results", "5")
-  .option("--semantic", "Use semantic search (requires CONTEXT_EMBEDDING_PROVIDER)")
-  .option("--json", "Output as JSON")
-  .action(
-    async (
-      query: string,
-      opts: { library?: string; limit?: string; semantic?: boolean; json?: boolean }
-    ) => {
-      let libraryId: string | undefined;
-      let libraryName: string | undefined;
-
-      if (opts.library) {
-        const lib = getLibraryBySlug(opts.library);
-        libraryId = lib.id;
-        libraryName = lib.name;
-      }
-
-      const limit = parseInt(opts.limit ?? "5", 10);
-
-      // Semantic search
-      if (opts.semantic) {
-        const config = getEmbeddingConfig();
-        if (!config) {
-          console.error(
-            chalk.red("Semantic search requires CONTEXT_EMBEDDING_PROVIDER=openai|anthropic")
-          );
-          process.exit(1);
-        }
-        const queryVec = await embedText(query, config);
-        const results = semanticSearch(queryVec, libraryId, limit);
-
-        if (opts.json) {
-          console.log(JSON.stringify(results, null, 2));
-          return;
-        }
-
-        if (results.length === 0) {
-          console.log(chalk.gray(`No semantic results for "${query}"`));
-          return;
-        }
-
-        console.log(chalk.bold(`\n${results.length} semantic results for "${query}":\n`));
-        for (const r of results) {
-          if (r.title || r.url) {
-            console.log(chalk.cyan(r.title ?? r.url ?? ""));
-          }
-          console.log(chalk.gray(`score: ${r.score.toFixed(3)}`));
-          console.log(r.content.slice(0, 300) + (r.content.length > 300 ? "…" : ""));
-          console.log();
-        }
-        return;
-      }
-
-      // FTS5 search
-      const results = searchChunks(query, libraryId, limit);
-
-      if (opts.json) {
-        console.log(JSON.stringify(results, null, 2));
-        return;
-      }
-
-      if (results.length === 0) {
-        console.log(chalk.gray(`No results for "${query}"`));
-        return;
-      }
-
-      const scope = libraryName ? ` in ${chalk.bold(libraryName)}` : "";
-      console.log(chalk.bold(`\n${results.length} results for "${query}"${scope}:\n`));
-      for (const r of results) {
-        if (r.title || r.url) console.log(chalk.cyan(r.title ?? r.url ?? ""));
-        if (r.url && r.title) console.log(chalk.gray(r.url));
-        console.log(r.content.slice(0, 300) + (r.content.length > 300 ? "…" : ""));
-        console.log();
-      }
-    }
-  );
-
-// ─── context embed ────────────────────────────────────────────────────────────
-
-program
-  .command("embed <slug>")
-  .description("Generate semantic embeddings for a library's chunks")
-  .option("--all", "Re-embed even already-embedded chunks")
-  .action(async (slug: string, opts: { all?: boolean }) => {
-    const config = getEmbeddingConfig();
-    if (!config) {
-      console.error(
-        chalk.red(
-          "Set CONTEXT_EMBEDDING_PROVIDER=openai|anthropic to enable embeddings"
-        )
-      );
-      process.exit(1);
-    }
-
-    const library = getLibraryBySlug(slug);
-    const { total, embedded } = embeddingCoverage(library.id);
-
-    if (total === 0) {
-      console.log(chalk.yellow(`No chunks found for ${library.name}. Run: context add ${slug}`));
-      return;
-    }
-
-    const toEmbed = opts.all ? total : total - embedded;
-    if (toEmbed === 0) {
-      console.log(chalk.gray(`All ${total} chunks already embedded for ${library.name}.`));
-      return;
-    }
-
-    console.log(
-      chalk.bold(`\nEmbedding ${library.name}`) +
-        chalk.gray(` — ${toEmbed} chunks with ${config.model}...\n`)
-    );
-
-    const { getDatabase } = await import("../db/database.js");
-    const db = getDatabase();
-    let sql = "SELECT id, content FROM chunks WHERE library_id = ?";
-    if (!opts.all) {
-      sql +=
-        " AND id NOT IN (SELECT chunk_id FROM chunk_embeddings)";
-    }
-
-    const chunks = db
-      .query<{ id: string; content: string }, [string]>(sql)
-      .all(library.id);
-
-    let done = 0;
-    let failed = 0;
-
-    for (const chunk of chunks) {
-      try {
-        const vec = await embedText(chunk.content, config);
-        saveEmbedding(chunk.id, config.model, vec, db);
-        done++;
-        if (done % 10 === 0 || done === chunks.length) {
-          process.stdout.write(`\r  ${done}/${chunks.length} chunks embedded`);
-        }
-      } catch {
-        failed++;
-      }
-    }
-
-    console.log(
-      `\n\n${chalk.green(`✓ Embedded ${done} chunks`)}` +
-        (failed > 0 ? chalk.red(` (${failed} failed)`) : "")
-    );
-  });
-
-// ─── context refresh ──────────────────────────────────────────────────────────
-
-program
-  .command("refresh <slug>")
-  .description("Re-crawl and re-index a library")
-  .option("-p, --pages <n>", "max pages to crawl", "30")
-  .option("-c, --crawler <type>", "crawler: exa|firecrawl", getDefaultCrawler())
-  .action(async (slug: string, opts: { pages?: string; crawler?: string }) => {
-    const library = getLibraryBySlug(slug);
-    const maxPages = parseInt(opts.pages ?? "30", 10);
-    const crawler = (opts.crawler ?? getDefaultCrawler()) as CrawlerType;
-
-    console.log(
-      chalk.bold(`\nRefreshing ${library.name}`) + chalk.gray(` via ${crawler}...`)
-    );
-
-    const result = await crawlLibrary(library.id, { maxPages, refresh: true, crawler });
-
-    console.log(
-      chalk.green(`\n✓ Refreshed ${chalk.bold(library.name)}`) +
-        chalk.gray(` — ${result.pages_crawled} pages, ${result.chunks_indexed} chunks`)
-    );
-
-    if (result.errors.length > 0) {
-      console.log(chalk.yellow(`\nWarnings (${result.errors.length}):`));
-      result.errors.slice(0, 3).forEach((e) => console.log(chalk.gray(`  ${e}`)));
-    }
-  });
-
-// ─── context remove ───────────────────────────────────────────────────────────
-
-program
-  .command("remove <slug>")
-  .description("Remove a library and all its indexed data")
-  .action((slug: string) => {
-    const library = getLibraryBySlug(slug);
-    deleteLibrary(library.id);
-    console.log(chalk.green(`✓ Removed ${library.name}`));
-  });
-
-// ─── context info ─────────────────────────────────────────────────────────────
-
-program
-  .command("info <slug>")
-  .description("Show details for an indexed library")
-  .option("--json", "Output as JSON")
-  .action((slug: string, opts: { json?: boolean }) => {
-    const lib = getLibraryBySlug(slug);
-    const links = getLinks(lib.id);
-    const { total, embedded } = embeddingCoverage(lib.id);
-
-    if (opts.json) {
-      console.log(JSON.stringify({ ...lib, links, embeddings: { total, embedded } }, null, 2));
-      return;
-    }
-
-    console.log(chalk.bold(`\n${lib.name}`));
-    console.log(`  ID:          /context/${lib.slug}`);
-    if (lib.description) console.log(`  Description: ${lib.description}`);
-    if (lib.npm_package) console.log(`  npm:         ${lib.npm_package}`);
-    if (lib.github_repo) console.log(`  GitHub:      ${lib.github_repo}`);
-    if (lib.docs_url) console.log(`  Docs URL:    ${lib.docs_url}`);
-    if (lib.version) console.log(`  Version:     ${lib.version}`);
-    console.log(`  Chunks:      ${lib.chunk_count}`);
-    console.log(`  Pages:       ${lib.document_count}`);
-    if (embedded > 0) {
-      console.log(`  Embeddings:  ${embedded}/${total} chunks`);
-    }
-    if (lib.last_crawled_at) {
-      console.log(`  Crawled:     ${formatDate(lib.last_crawled_at)}`);
-    }
-
-    if (links.length > 0) {
-      console.log(`\n  Links:`);
-      for (const link of links) {
-        console.log(`    ${chalk.gray(`[${link.type}]`)} ${link.label ? `${link.label}: ` : ""}${chalk.cyan(link.url)}`);
-      }
-    }
-    console.log();
-  });
-
-// ─── context links ────────────────────────────────────────────────────────────
-
-program
-  .command("links <slug>")
-  .description("Manage links for a library")
-  .option("--add <url>", "Add a link URL")
-  .option("-t, --type <type>", "Link type: docs|npm|github|api|examples|tutorial|changelog|playground")
-  .option("--label <text>", "Link label")
-  .option("--json", "Output as JSON")
-  .action(
-    (slug: string, opts: { add?: string; type?: string; label?: string; json?: boolean }) => {
-      const lib = getLibraryBySlug(slug);
-
-      if (opts.add) {
-        const link = addLink({
-          library_id: lib.id,
-          url: opts.add,
-          type: (opts.type as LinkType) ?? "docs",
-          label: opts.label,
-        });
-        console.log(chalk.green(`✓ Added ${link.type} link: ${link.url}`));
-        return;
-      }
-
-      const links = getLinks(lib.id);
-
-      if (opts.json) {
-        console.log(JSON.stringify(links, null, 2));
-        return;
-      }
-
-      if (links.length === 0) {
-        console.log(chalk.gray(`No links for ${lib.name}`));
-        return;
-      }
-
-      console.log(chalk.bold(`\n${lib.name} — Links:\n`));
-      for (const link of links) {
-        console.log(
-          `  ${chalk.gray(`[${link.type}]`)}  ${link.label ? chalk.bold(link.label) + " " : ""}${chalk.cyan(link.url)}`
-        );
-      }
-      console.log();
-    }
-  );
-
-// ─── context history ──────────────────────────────────────────────────────────
-
-program
-  .command("history <slug>")
-  .description("Show version history of crawled documents for a library")
-  .option("--json", "Output as JSON")
-  .action((slug: string, opts: { json?: boolean }) => {
-    const lib = getLibraryBySlug(slug);
-    const docs = listDocuments(lib.id);
-
-    if (docs.length === 0) {
-      console.log(chalk.gray(`No crawled pages for ${lib.name}`));
-      return;
-    }
-
-    if (opts.json) {
-      const all = docs.map((d) => ({
-        ...d,
-        versions: getDocumentVersions(d.id),
-      }));
-      console.log(JSON.stringify(all, null, 2));
-      return;
-    }
-
-    console.log(chalk.bold(`\n${lib.name} — Document History:\n`));
-    for (const doc of docs) {
-      const versions = getDocumentVersions(doc.id);
-      if (versions.length === 0) continue;
-      console.log(`  ${chalk.cyan(doc.url ?? doc.id)}`);
-      for (const v of versions) {
-        console.log(
-          `    v${v.version_number}  ${chalk.gray(formatDate(v.crawled_at))}  ${chalk.gray(`hash:${v.content_hash}`)}`
-        );
-      }
-    }
-    console.log();
-  });
+registerLibraryCommands(program);
 
 // ─── context kg ───────────────────────────────────────────────────────────────
 
@@ -582,10 +67,10 @@ program
       const { getDatabase } = require("../db/database.js") as typeof import("../db/database.js");
       const db = getDatabase();
       const node = db
-        .query<{ id: string }, [string]>(
-          "SELECT id FROM kg_nodes WHERE library_id = ? LIMIT 1"
-        )
-        .get(lib.id);
+        .get(
+          "SELECT id FROM kg_nodes WHERE library_id = ? LIMIT 1",
+          lib.id
+        );
 
       if (!node) {
         console.log(chalk.gray(`No KG node for ${lib.name}. Run: context seed`));
@@ -671,15 +156,359 @@ program
     });
   });
 
-program.parse();
+// ─── context index ─────────────────────────────────────────────────────────────
 
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  const diff = Date.now() - d.getTime();
-  const hours = Math.floor(diff / 3600000);
-  if (hours < 1) return "just now";
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return d.toLocaleDateString();
-}
+program
+  .command("index <path>")
+  .description("Index a local repository to build a code knowledge graph")
+  .option("-w, --watch", "Enable file watching for real-time updates")
+  .action(async (path: string, opts: { watch?: boolean }) => {
+    const existing = getContextByPath(path);
+    if (existing) {
+      console.log(chalk.yellow(`Context already indexed at ${path}`));
+      console.log(`  ID: ${existing.id}`);
+      console.log(`  Files: ${existing.file_count}, Entities: ${existing.entity_count}`);
+      console.log(chalk.gray(`Use 'context refresh ${path}' to re-scan changed files.`));
+      return;
+    }
+
+    console.log(chalk.bold(`\nIndexing context at ${path}...`));
+    try {
+      const result = await indexRepository(path);
+      console.log(chalk.green(`\n✓ Indexed ${result.context.name}`));
+      console.log(`  Type: ${result.context.type}`);
+      console.log(`  Language: ${result.context.language ?? "Unknown"}`);
+      console.log(`  Files: ${result.stats.filesIndexed}`);
+      console.log(`  Entities: ${result.stats.entitiesExtracted}`);
+      console.log(`  Relations: ${result.stats.relationsFound}`);
+      if (opts.watch) {
+        console.log(chalk.gray(`  Watching for changes: enabled`));
+      }
+    } catch (err) {
+      console.error(chalk.red("Index failed:"), err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });
+
+// ─── context reindex ───────────────────────────────────────────────────────────
+
+program
+  .command("reindex <path>")
+  .description("Re-scan an indexed repository to pick up new/changed files")
+  .action(async (path: string) => {
+    const existing = getContextByPath(path);
+    if (!existing) {
+      console.log(chalk.yellow(`Context not indexed at ${path}`));
+      console.log(chalk.gray(`Use 'context index ${path}' to index it first.`));
+      return;
+    }
+
+    console.log(chalk.bold(`\nRefreshing ${existing.name}...`));
+    try {
+      const result = await refreshRepository(path);
+      console.log(chalk.green(`\n✓ Refreshed`));
+      console.log(`  Files indexed: ${result.stats.filesIndexed}`);
+      console.log(`  Entities: ${result.stats.entitiesExtracted}`);
+      if (result.stats.errors.length > 0) {
+        console.log(chalk.yellow(`  Errors: ${result.stats.errors.slice(0, 3).join("; ")}`));
+      }
+    } catch (err) {
+      console.error(chalk.red("Refresh failed:"), err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });
+
+// ─── context repos ─────────────────────────────────────────────────────────────
+
+program
+  .command("repos")
+  .description("List all locally indexed contexts")
+  .option("--json", "Output as JSON")
+  .action((opts: { json?: boolean }) => {
+    const contexts = listContexts();
+
+    if (contexts.length === 0) {
+      console.log(chalk.gray("No contexts indexed."));
+      console.log(chalk.gray("Use 'context index <path>' to index a context."));
+      return;
+    }
+
+    if (opts.json) {
+      console.log(JSON.stringify(contexts, null, 2));
+      return;
+    }
+
+    console.log(chalk.bold(`\n${contexts.length} context ${contexts.length === 1 ? "" : "s"} indexed:\n`));
+    for (const ctx of contexts) {
+      const status = `${ctx.file_count} files, ${ctx.entity_count} entities`;
+      const lastIndexed = ctx.last_indexed_at
+        ? `last indexed ${formatDate(ctx.last_indexed_at)}`
+        : "never indexed";
+      console.log(`  ${chalk.bold(ctx.name)} ${chalk.gray(`(${ctx.type}: ${ctx.language ?? "Unknown"})`)}`);
+      console.log(`    Path: ${chalk.cyan(ctx.path)}`);
+      console.log(`    ${status} — ${chalk.gray(lastIndexed)}`);
+      console.log();
+    }
+  });
+
+// ─── context context ───────────────────────────────────────────────────────────
+
+program
+  .command("context <path>")
+  .description("Get relevant code context for a file or query")
+  .option("-q, --query <text>", "Text search query")
+  .option("-e, --entity <name>", "Entity (function/class) name")
+  .option("-n, --results <n>", "Max results to return", "15")
+  .option("-d, --depth <n>", "Max graph traversal depth", "3")
+  .option("--json", "Output as JSON")
+  .action((path: string, opts: { query?: string; entity?: string; results?: string; depth?: string; json?: boolean }) => {
+    const ctx = getContextByPath(path);
+    if (!ctx) {
+      console.log(chalk.yellow(`Context not indexed at ${path}`));
+      console.log(chalk.gray(`Use 'context index ${path}' to index it first.`));
+      return;
+    }
+
+    const maxResults = parseInt(opts.results ?? "15", 10);
+    const maxDepth = parseInt(opts.depth ?? "3", 10);
+    const searchQuery = opts.query ?? opts.entity ?? path.split("/").pop() ?? "";
+
+    const results = getRelevantContext(
+      { query: searchQuery },
+      { maxResults, maxDistance: maxDepth }
+    );
+
+    if (results.length === 0) {
+      console.log(chalk.gray(`No relevant context found for "${searchQuery}"`));
+      return;
+    }
+
+    if (opts.json) {
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+
+    console.log(chalk.bold(`\nRelevant Context for "${searchQuery}"\n`));
+    for (const result of results) {
+      const score = Math.round(result.score * 100);
+      console.log(`${chalk.green("─".repeat(50))}`);
+      if (result.item) {
+        console.log(`  ${chalk.bold(result.item.name)} ${chalk.gray(`${score}% related`)}`);
+        console.log(`  Path: ${chalk.cyan(result.item.path)}`);
+        console.log(`  Lines: ${result.item.line_count}`);
+        const preview = (result.item.content ?? "").slice(0, 200).replace(/\n/g, " ");
+        console.log(`  Preview: ${chalk.gray(preview)}...`);
+      } else if (result.entity) {
+        console.log(`  ${chalk.bold(result.entity.name)} ${chalk.gray(`(${result.entity.type})`)} ${chalk.green(`${score}%`)}`);
+        if (result.entity.signature) {
+          console.log(`  Signature: ${chalk.cyan(result.entity.signature)}`);
+        }
+        console.log(`  Lines: ${result.entity.start_line}-${result.entity.end_line}`);
+      }
+      console.log(`  ${chalk.gray("Reason:")} ${result.reason}`);
+    }
+    console.log();
+  });
+
+// ─── context relations ─────────────────────────────────────────────────────────
+
+program
+  .command("relations <path>")
+  .description("Get all files and entities related to a file")
+  .option("-f, --file <filepath>", "Specific file path within the context")
+  .option("-d, --depth <n>", "Traversal depth", "2")
+  .option("--json", "Output as JSON")
+  .action((path: string, opts: { file?: string; depth?: string; json?: boolean }) => {
+    const ctx = getContextByPath(path);
+    if (!ctx) {
+      console.log(chalk.yellow(`Context not indexed at ${path}`));
+      console.log(chalk.gray(`Use 'context index ${path}' to index it first.`));
+      return;
+    }
+
+    const targetFile = opts.file ?? path;
+    const items = searchContextItems(targetFile.split("/").pop() ?? targetFile, ctx.id);
+    const matched = items.find((f) => f.path.endsWith(targetFile) || f.path === targetFile);
+
+    if (!matched) {
+      console.log(chalk.yellow(`File not found: ${targetFile}`));
+      return;
+    }
+
+    const entities = getCodeEntitiesByItem(matched.id);
+    const relatedItems = getRelatedItems(matched.id, parseInt(opts.depth ?? "2", 10));
+
+    if (opts.json) {
+      console.log(JSON.stringify({
+        file: matched,
+        entities,
+        relatedItems: relatedItems.map(r => ({ item: r.item, distance: r.distance, relation: r.relation }))
+      }, null, 2));
+      return;
+    }
+
+    console.log(chalk.bold(`\nRelations for ${matched.name}\n`));
+    console.log(`Path: ${chalk.cyan(matched.path)}`);
+    console.log(`Entities: ${entities.length}`);
+
+    if (entities.length > 0) {
+      console.log(chalk.bold("\nCode Entities:"));
+      for (const entity of entities) {
+        console.log(`  ${chalk.cyan(entity.type)} ${chalk.bold(entity.name)} (lines ${entity.start_line}-${entity.end_line})`);
+      }
+    }
+
+    if (relatedItems.length > 0) {
+      console.log(chalk.bold("\nRelated Files:"));
+      for (const { item, distance, relation } of relatedItems.slice(0, 20)) {
+        console.log(`  ${chalk.bold(item.name)} ${chalk.gray(`(distance: ${distance})`)}`);
+        console.log(`    via: ${relation.relation_type}`);
+      }
+      if (relatedItems.length > 20) {
+        console.log(chalk.gray(`  ... and ${relatedItems.length - 20} more`));
+      }
+    }
+    console.log();
+  });
+
+// ─── context codesearch ────────────────────────────────────────────────────────
+
+program
+  .command("codesearch <query>")
+  .description("Search indexed contexts for files or entities")
+  .option("-r, --repo <path>", "Context path to search within")
+  .option("-t, --type <type>", "Search type: all|files|entities", "all")
+  .option("--json", "Output as JSON")
+  .action((query: string, opts: { repo?: string; type?: string; json?: boolean }) => {
+    let contextId: string | undefined;
+    if (opts.repo) {
+      const ctx = getContextByPath(opts.repo);
+      if (!ctx) {
+        console.log(chalk.yellow(`Context not found at ${opts.repo}`));
+        return;
+      }
+      contextId = ctx.id;
+    }
+
+    const type = opts.type ?? "all";
+    const results: string[] = [];
+
+    if (type === "all" || type === "files") {
+      const items = searchContextItems(query, contextId);
+      if (items.length > 0) {
+        results.push(chalk.bold(`\nFiles matching "${query}" (${items.length}):\n`));
+        for (const item of items.slice(0, 20)) {
+          results.push(`  ${chalk.bold(item.name)} ${chalk.gray(item.path)} (${item.line_count} lines)`);
+        }
+        if (items.length > 20) results.push(chalk.gray(`  ... and ${items.length - 20} more`));
+      }
+    }
+
+    if (type === "all" || type === "entities") {
+      const entities = searchCodeEntities(query, contextId);
+      if (entities.length > 0) {
+        results.push(chalk.bold(`\nEntities matching "${query}" (${entities.length}):\n`));
+        for (const entity of entities.slice(0, 20)) {
+          results.push(`  ${chalk.cyan(entity.type)} ${chalk.bold(entity.name)} in ${chalk.gray(entity.item_id)}`);
+        }
+        if (entities.length > 20) results.push(chalk.gray(`  ... and ${entities.length - 20} more`));
+      }
+    }
+
+    if (results.length === 0) {
+      console.log(chalk.gray(`No results found for "${query}"`));
+      return;
+    }
+
+    console.log(results.join("\n"));
+    console.log();
+  });
+
+// ─── context watch ─────────────────────────────────────────────────────────────
+
+program
+  .command("watch <path>")
+  .description("Watch a context and auto-update knowledge graph on file changes")
+  .option("--no-auto", "Disable automatic graph updates")
+  .action(async (path: string, opts: { auto?: boolean }) => {
+    const { watchContextWithHooks, createGraphUpdateHook } = await import("../hooks/index.js");
+
+    const ctx = getContextByPath(path);
+    if (!ctx) {
+      console.log(chalk.yellow(`Context not indexed at ${path}`));
+      console.log(chalk.gray(`Use 'context index ${path}' to index it first.`));
+      return;
+    }
+
+    const hooks = opts.auto !== false ? [createGraphUpdateHook(path)] : [];
+    console.log(chalk.bold(`\nWatching ${path} with ${hooks.length} hook(s)...`));
+    console.log(chalk.gray("Press Ctrl+C to stop.\n"));
+
+    watchContextWithHooks(path, hooks);
+
+    // Keep process alive
+    process.stdin.resume();
+  });
+
+// ─── context edit-context ─────────────────────────────────────────────────────
+
+program
+  .command("edit-context <path>")
+  .description("Get context suggestions for editing a file")
+  .option("-f, --file <filepath>", "Specific file within the context")
+  .option("-n, --results <n>", "Max related files to show", "10")
+  .option("--json", "Output as JSON")
+  .action(async (path: string, opts: { file?: string; results?: string; json?: boolean }) => {
+    const { getEditContext } = await import("../hooks/index.js");
+
+    const ctx = getContextByPath(path);
+    if (!ctx) {
+      console.log(chalk.yellow(`Context not indexed at ${path}`));
+      return;
+    }
+
+    // If -f flag not provided, path is the file path
+    const filePath = opts.file ? join(path, opts.file) : path;
+    const result = getEditContext(path, filePath, {
+      maxRelated: parseInt(opts.results ?? "10", 10),
+    });
+
+    if (!result.item) {
+      console.log(chalk.yellow(`File not found: ${opts.file ?? path}`));
+      return;
+    }
+
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    console.log(chalk.bold(`\nEdit Context for ${result.item.name}\n`));
+    console.log(`Path: ${chalk.cyan(result.item.path)}`);
+    console.log(`Entities: ${result.entities.length}`);
+
+    if (result.entities.length > 0) {
+      console.log(chalk.bold("\nCode Entities:"));
+      for (const entity of result.entities.slice(0, 15)) {
+        console.log(`  ${chalk.cyan(entity.type)} ${chalk.bold(entity.name)} (lines ${entity.start_line}-${entity.end_line})`);
+      }
+    }
+
+    if (result.relatedItems.length > 0) {
+      console.log(chalk.bold("\nRelated Files:"));
+      for (const { item, distance, via } of result.relatedItems) {
+        console.log(`  ${chalk.bold(item.name)} ${chalk.gray(`(${distance} hop${distance > 1 ? "s" : ""})`)}`);
+        console.log(`    via: ${via}`);
+      }
+    }
+
+    if (result.suggestions.length > 0) {
+      console.log(chalk.bold("\nSuggestions:"));
+      for (const s of result.suggestions) {
+        console.log(`  ${chalk.gray(s)}`);
+      }
+    }
+    console.log();
+  });
+
+program.parse();

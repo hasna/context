@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { Database } from "bun:sqlite";
+import type { SqliteAdapter } from "@hasna/cloud";
 import { getDatabase } from "./database.js";
 import type { Library, CreateLibraryInput } from "../types/index.js";
 import { LibraryNotFoundError } from "../types/index.js";
@@ -31,7 +31,7 @@ function rowToLibrary(row: Record<string, unknown>): Library {
 
 export function createLibrary(
   input: CreateLibraryInput,
-  db?: Database
+  db?: SqliteAdapter
 ): Library {
   const database = db ?? getDatabase();
   const id = randomUUID();
@@ -59,78 +59,67 @@ export function createLibrary(
   return getLibraryById(id, database);
 }
 
-export function getLibraryById(id: string, db?: Database): Library {
+export function getLibraryById(id: string, db?: SqliteAdapter): Library {
   const database = db ?? getDatabase();
-  const row = database
-    .query<Record<string, unknown>, [string]>(
-      "SELECT * FROM libraries WHERE id = ?"
-    )
-    .get(id);
+  const row = database.get("SELECT * FROM libraries WHERE id = ?", id) as Record<string, unknown> | null;
   if (!row) throw new LibraryNotFoundError(id);
   return rowToLibrary(row);
 }
 
-export function getLibraryBySlug(slug: string, db?: Database): Library {
+export function getLibraryBySlug(slug: string, db?: SqliteAdapter): Library {
   const database = db ?? getDatabase();
-  const row = database
-    .query<Record<string, unknown>, [string]>(
-      "SELECT * FROM libraries WHERE slug = ?"
-    )
-    .get(slug);
+  const row = database.get("SELECT * FROM libraries WHERE slug = ?", slug) as Record<string, unknown> | null;
   if (!row) throw new LibraryNotFoundError(slug);
   return rowToLibrary(row);
 }
 
-export function listLibraries(db?: Database): Library[] {
+export function listLibraries(db?: SqliteAdapter): Library[] {
   const database = db ?? getDatabase();
-  return database
-    .query<Record<string, unknown>, []>(
-      "SELECT * FROM libraries ORDER BY name ASC"
-    )
-    .all()
-    .map(rowToLibrary);
+  const rows = database.all("SELECT * FROM libraries ORDER BY name ASC") as Record<string, unknown>[];
+  return rows.map(rowToLibrary);
 }
 
 export function searchLibraries(
   query: string,
   limit = 10,
-  db?: Database
+  db?: SqliteAdapter
 ): Library[] {
   const database = db ?? getDatabase();
   const escaped = escapeFts(query);
 
   let rows: Record<string, unknown>[] = [];
   try {
-    rows = database
-      .query<Record<string, unknown>, [string, number]>(
-        `SELECT l.* FROM libraries l
-         JOIN libraries_fts_map m ON l.id = m.library_id
-         JOIN libraries_fts f ON f.rowid = m.rowid
-         WHERE libraries_fts MATCH ?
-         ORDER BY rank
-         LIMIT ?`
-      )
-      .all(escaped, limit);
+    rows = database.all(
+      `SELECT l.* FROM libraries l
+       JOIN libraries_fts_map m ON l.id = m.library_id
+       JOIN libraries_fts f ON f.rowid = m.rowid
+       WHERE libraries_fts MATCH ?
+       ORDER BY rank
+       LIMIT ?`,
+      escaped,
+      limit
+    ) as Record<string, unknown>[];
   } catch {
     // FTS error fallback
   }
 
   if (rows.length === 0) {
     // Fallback: LIKE search
-    return database
-      .query<Record<string, unknown>, [string, string, string, number]>(
-        `SELECT * FROM libraries
-         WHERE name LIKE ? OR slug LIKE ? OR npm_package LIKE ?
-         ORDER BY name ASC LIMIT ?`
-      )
-      .all(`%${query}%`, `%${query}%`, `%${query}%`, limit)
-      .map(rowToLibrary);
+    return database.all(
+      `SELECT * FROM libraries
+       WHERE name LIKE ? OR slug LIKE ? OR npm_package LIKE ?
+       ORDER BY name ASC LIMIT ?`,
+      `%${query}%`,
+      `%${query}%`,
+      `%${query}%`,
+      limit
+    ).map(rowToLibrary);
   }
 
   return rows.map(rowToLibrary);
 }
 
-export function updateLibraryCounts(id: string, db?: Database): void {
+export function updateLibraryCounts(id: string, db?: SqliteAdapter): void {
   const database = db ?? getDatabase();
   database.run(
     `UPDATE libraries SET
@@ -146,7 +135,7 @@ export function updateLibraryCounts(id: string, db?: Database): void {
 export function updateLibraryVersion(
   id: string,
   version: string,
-  db?: Database
+  db?: SqliteAdapter
 ): void {
   const database = db ?? getDatabase();
   database.run(
@@ -155,7 +144,7 @@ export function updateLibraryVersion(
   );
 }
 
-export function deleteLibrary(id: string, db?: Database): void {
+export function deleteLibrary(id: string, db?: SqliteAdapter): void {
   const database = db ?? getDatabase();
   // FK cascade deletes documents, chunks. Trigger handles FTS cleanup.
   database.run("DELETE FROM libraries WHERE id = ?", [id]);

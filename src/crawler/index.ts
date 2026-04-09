@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { SqliteAdapter } from "@hasna/cloud";
 import { getDatabase } from "../db/database.js";
 import { getLibraryById, updateLibraryCounts } from "../db/libraries.js";
 import { upsertDocument } from "../db/documents.js";
@@ -34,7 +34,7 @@ export interface CrawlOptions {
 export async function crawlLibrary(
   libraryId: string,
   options: CrawlOptions = {},
-  db?: Database
+  db?: SqliteAdapter
 ): Promise<CrawlResult> {
   const database = db ?? getDatabase();
   const library = getLibraryById(libraryId, database);

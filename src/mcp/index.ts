@@ -5,25 +5,21 @@ import { registerCloudTools } from "@hasna/cloud";
 import { z } from "zod";
 import { createRequire } from "module";
 import {
-  searchLibraries,
-  getLibraryBySlug,
-  listLibraries,
-  createLibrary,
-} from "../db/libraries.js";
-import { searchChunks } from "../db/chunks.js";
-import { crawlLibrary, getDefaultCrawler } from "../crawler/index.js";
-import type { CrawlerType } from "../crawler/index.js";
-import { getLinks } from "../db/links.js";
-import { getRelatedNodes } from "../db/kg.js";
+  indexRepository,
+  refreshRepository,
+  watchRepository,
+} from "../indexer/index.js";
 import {
-  getEmbeddingConfig,
-  embedText,
-  semanticSearch,
-} from "../db/embeddings.js";
-import { SEED_LIBRARIES } from "../seeds/libraries.js";
-import { syncLinks } from "../db/links.js";
-import type { LinkType } from "../db/links.js";
-import { upsertNode } from "../db/kg.js";
+  listContexts,
+  getContextByPath,
+  getCodeEntitiesByItem,
+  getRelationsByItem,
+  getRelatedItems,
+  searchContextItems,
+  searchCodeEntities,
+  getRelevantContext,
+} from "../db/repositories.js";
+import { registerLibraryTools } from "./library-tools.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
@@ -34,476 +30,7 @@ const server = new McpServer({ name: "context", version: pkg.version });
 interface _CtxAgent { id: string; name: string; session_id?: string; last_seen_at: string; project_id?: string; }
 const _ctxAgents = new Map<string, _CtxAgent>();
 
-// ─── resolve-library-id ───────────────────────────────────────────────────────
-
-server.tool(
-  "resolve-library-id",
-  `Search the local documentation index for a library and return its ID.
-Use this before query-docs to get the correct library ID.
-Returns matching libraries with IDs, descriptions, and links.`,
-  {
-    libraryName: z
-      .string()
-      .describe("Library name to search for (e.g. 'react', 'express', 'numpy')"),
-  },
-  async ({ libraryName }) => {
-    try {
-      const results = searchLibraries(libraryName, 5);
-
-      if (results.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No libraries found matching "${libraryName}".\nRun: context add "${libraryName}" to index it, or context seed to populate popular libraries.`,
-            },
-          ],
-        };
-      }
-
-      const formatted = results
-        .map((lib) => {
-          const links = getLinks(lib.id);
-          const lines = [
-            `- Library ID: /context/${lib.slug}`,
-            `  Name: ${lib.name}`,
-          ];
-          if (lib.description) lines.push(`  Description: ${lib.description}`);
-          if (lib.npm_package) lines.push(`  npm: ${lib.npm_package}`);
-          if (lib.version) lines.push(`  Version: ${lib.version}`);
-
-          const docsLink = links.find((l) => l.type === "docs") ?? links.find((l) => l.type === "api");
-          if (docsLink) lines.push(`  Docs: ${docsLink.url}`);
-          if (lib.github_repo) lines.push(`  GitHub: https://github.com/${lib.github_repo}`);
-
-          lines.push(
-            `  Indexed: ${lib.chunk_count > 0 ? `${lib.chunk_count} chunks from ${lib.document_count} pages` : "not yet crawled"}`
-          );
-          return lines.join("\n");
-        })
-        .join("\n\n");
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Found ${results.length} matching librar${results.length === 1 ? "y" : "ies"}:\n\n${formatted}`,
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ─── query-docs ───────────────────────────────────────────────────────────────
-
-server.tool(
-  "query-docs",
-  `Fetch relevant documentation chunks for a library.
-Uses FTS5 full-text search, with semantic search as fallback when embeddings are available.
-Provide a specific topic or query to get the most relevant chunks.`,
-  {
-    context7CompatibleLibraryID: z
-      .string()
-      .describe("Library ID from resolve-library-id (e.g. '/context/react' or 'react')"),
-    tokens: z
-      .number()
-      .optional()
-      .default(5000)
-      .describe("Max tokens to return (default: 5000)"),
-    topic: z
-      .string()
-      .optional()
-      .describe("Specific topic or query to search within the library docs"),
-  },
-  async ({ context7CompatibleLibraryID, tokens = 5000, topic }) => {
-    try {
-      const slug = context7CompatibleLibraryID
-        .replace(/^\/context\//, "")
-        .replace(/^\//, "")
-        .trim();
-
-      const library = getLibraryBySlug(slug);
-
-      if (library.chunk_count === 0) {
-        const links = getLinks(library.id);
-        const docsUrl = links.find((l) => l.type === "docs")?.url ?? library.docs_url;
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Library "${library.name}" has no indexed documentation yet.\n` +
-                (docsUrl ? `Official docs: ${docsUrl}\n` : "") +
-                `Run: context add ${slug}  (or: context refresh ${slug})`,
-            },
-          ],
-        };
-      }
-
-      const query = topic ?? library.name;
-      const maxChunks = Math.ceil(tokens / 300);
-
-      // Try semantic search first if available
-      const embConfig = getEmbeddingConfig();
-      let results;
-
-      if (embConfig) {
-        try {
-          const queryVec = await embedText(query, embConfig);
-          const semantic = semanticSearch(queryVec, library.id, maxChunks);
-          // Merge with FTS5 results for hybrid ranking
-          const fts = searchChunks(query, library.id, maxChunks);
-          const seen = new Set<string>();
-          results = [];
-          for (const r of [...semantic.slice(0, Math.ceil(maxChunks * 0.6)), ...fts]) {
-            if (seen.has(r.chunk_id)) continue;
-            seen.add(r.chunk_id);
-            results.push(r);
-            if (results.length >= maxChunks) break;
-          }
-        } catch {
-          results = searchChunks(query, library.id, maxChunks);
-        }
-      } else {
-        results = searchChunks(query, library.id, maxChunks);
-      }
-
-      if (results.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No documentation found for "${query}" in ${library.name}. The library has ${library.chunk_count} chunks — try a different query.`,
-            },
-          ],
-        };
-      }
-
-      const links = getLinks(library.id);
-      let output = `# ${library.name} Documentation\n`;
-      if (library.version) output += `Version: ${library.version}\n`;
-      const docsLink = links.find((l) => l.type === "docs") ?? links.find((l) => l.type === "api");
-      if (docsLink) output += `Source: ${docsLink.url}\n`;
-      output += "\n";
-
-      let totalTokens = 0;
-      for (const result of results) {
-        const chunkTokens = Math.ceil(result.content.length / 4);
-        if (totalTokens + chunkTokens > tokens) break;
-
-        if (result.title || result.url) {
-          output += `---\n`;
-          if (result.title) output += `### ${result.title}\n`;
-          if (result.url) output += `Source: ${result.url}\n`;
-          output += "\n";
-        }
-
-        output += result.content + "\n\n";
-        totalTokens += chunkTokens;
-      }
-
-      return { content: [{ type: "text", text: output.trim() }] };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ─── add-library ──────────────────────────────────────────────────────────────
-
-server.tool(
-  "add-library",
-  `Index a new library by crawling its documentation via Exa or Firecrawl.
-After indexing, use resolve-library-id and query-docs to access the docs.`,
-  {
-    name: z.string().describe("Library name (e.g. 'React', 'Express')"),
-    npm_package: z.string().optional().describe("npm package name"),
-    docs_url: z.string().optional().describe("Official documentation URL"),
-    github_repo: z.string().optional().describe("GitHub repo (e.g. 'facebook/react')"),
-    max_pages: z.number().optional().default(20).describe("Max pages to crawl (default: 20)"),
-    crawler: z
-      .enum(["exa", "firecrawl"])
-      .optional()
-      .describe("Crawler to use: exa (default) or firecrawl"),
-  },
-  async ({ name, npm_package, docs_url, github_repo, max_pages = 20, crawler }) => {
-    try {
-      const existing = searchLibraries(name, 1);
-      if (
-        existing.length > 0 &&
-        existing[0] &&
-        existing[0].name.toLowerCase() === name.toLowerCase()
-      ) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Library "${name}" is already indexed with ID /context/${existing[0].slug}.`,
-            },
-          ],
-        };
-      }
-
-      const library = createLibrary({ name, npm_package, docs_url, github_repo });
-      const result = await crawlLibrary(library.id, {
-        maxPages: max_pages,
-        crawler: (crawler ?? getDefaultCrawler()) as CrawlerType,
-      });
-
-      const lines = [
-        `Indexed "${name}"`,
-        `Library ID: /context/${library.slug}`,
-        `Pages crawled: ${result.pages_crawled}`,
-        `Chunks indexed: ${result.chunks_indexed}`,
-      ];
-      if (result.errors.length > 0) {
-        lines.push(`Warnings: ${result.errors.slice(0, 2).join("; ")}`);
-      }
-
-      return { content: [{ type: "text", text: lines.join("\n") }] };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ─── list-libraries ───────────────────────────────────────────────────────────
-
-server.tool(
-  "list-libraries",
-  "List all libraries indexed in the local documentation store.",
-  {},
-  async () => {
-    try {
-      const libraries = listLibraries();
-
-      if (libraries.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No libraries indexed yet. Use add-library or run: context seed",
-            },
-          ],
-        };
-      }
-
-      const formatted = libraries.map((lib) => {
-        const status =
-          lib.chunk_count > 0
-            ? `${lib.chunk_count} chunks, ${lib.document_count} pages`
-            : "not crawled";
-        return `- /context/${lib.slug} — ${lib.name}${lib.version ? ` v${lib.version}` : ""} (${status})`;
-      }).join("\n");
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `${libraries.length} librar${libraries.length === 1 ? "y" : "ies"} indexed:\n\n${formatted}`,
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ─── get-library-links ────────────────────────────────────────────────────────
-
-server.tool(
-  "get-library-links",
-  "Get all links (docs, npm, github, api, etc.) for a library.",
-  {
-    libraryId: z
-      .string()
-      .describe("Library slug or /context/<slug> ID"),
-  },
-  async ({ libraryId }) => {
-    try {
-      const slug = libraryId.replace(/^\/context\//, "").trim();
-      const library = getLibraryBySlug(slug);
-      const links = getLinks(library.id);
-
-      if (links.length === 0) {
-        return {
-          content: [{ type: "text", text: `No links registered for ${library.name}.` }],
-        };
-      }
-
-      const formatted = links
-        .map((l) => `- [${l.type}] ${l.label ? `${l.label}: ` : ""}${l.url}`)
-        .join("\n");
-
-      return {
-        content: [{ type: "text", text: `${library.name} — Links:\n\n${formatted}` }],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ─── get-related-libraries ────────────────────────────────────────────────────
-
-server.tool(
-  "get-related-libraries",
-  "Find libraries related to a given library via the knowledge graph (alternatives, dependencies, commonly used together).",
-  {
-    libraryId: z.string().describe("Library slug or /context/<slug> ID"),
-    relation: z
-      .enum([
-        "depends_on",
-        "alternative_to",
-        "used_with",
-        "wraps",
-        "extends",
-        "part_of",
-        "replaced_by",
-      ])
-      .optional()
-      .describe("Filter by relation type"),
-  },
-  async ({ libraryId, relation }) => {
-    try {
-      const slug = libraryId.replace(/^\/context\//, "").trim();
-      const library = getLibraryBySlug(slug);
-
-      const { getDatabase } = await import("../db/database.js");
-      const db = getDatabase();
-      const node = db
-        .query<{ id: string }, [string]>(
-          "SELECT id FROM kg_nodes WHERE library_id = ? LIMIT 1"
-        )
-        .get(library.id);
-
-      if (!node) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No knowledge graph node for ${library.name}. Run: context seed`,
-            },
-          ],
-        };
-      }
-
-      const withRels = getRelatedNodes(node.id, relation as Parameters<typeof getRelatedNodes>[1]);
-
-      if (withRels.relations.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No ${relation ?? ""}relations found for ${library.name} in the knowledge graph.`,
-            },
-          ],
-        };
-      }
-
-      const lines = [`${library.name} — Related Libraries:`, ""];
-      for (const rel of withRels.relations) {
-        const arrow = rel.direction === "outgoing" ? "→" : "←";
-        lines.push(`${arrow} [${rel.relation}] ${rel.node.name} (${rel.node.type})`);
-      }
-
-      return { content: [{ type: "text", text: lines.join("\n") }] };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ─── seed-libraries ───────────────────────────────────────────────────────────
-
-server.tool(
-  "seed-libraries",
-  "Populate the database with metadata for popular tools and services (names, links, KG nodes). Does NOT crawl docs.",
-  {},
-  async () => {
-    try {
-      let added = 0;
-      let skipped = 0;
-
-      for (const seed of SEED_LIBRARIES) {
-        try {
-          const existing = searchLibraries(seed.name, 1);
-          if (
-            existing.length > 0 &&
-            existing[0] &&
-            existing[0].slug === seed.slug
-          ) {
-            skipped++;
-            continue;
-          }
-
-          const library = createLibrary({
-            name: seed.name,
-            slug: seed.slug,
-            description: seed.description,
-            npm_package: seed.npm_package,
-            github_repo: seed.github_repo,
-            docs_url: seed.docs_url,
-          });
-
-          if (seed.links) {
-            syncLinks(
-              library.id,
-              seed.links.map((l) => ({ type: l.type as LinkType, url: l.url, label: l.label }))
-            );
-          }
-
-          upsertNode({
-            type: "library",
-            name: seed.name,
-            description: seed.description,
-            library_id: library.id,
-            metadata: { slug: seed.slug, tags: seed.tags },
-          });
-
-          added++;
-        } catch {
-          // Skip failures silently
-        }
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Seeded ${added} libraries (${skipped} already existed).\nUse add-library to crawl docs for any of them.`,
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }
-);
+registerLibraryTools(server);
 
 server.tool(
   "send_feedback",
@@ -557,6 +84,541 @@ server.tool("set_focus", "Set active project context for this agent session.", {
 server.tool("list_agents", "List all registered agents.", {}, async () => {
   return { content: [{ type: "text", text: JSON.stringify([..._ctxAgents.values()]) }] };
 });
+
+// ─── Repository Indexing Tools ─────────────────────────────────────────────────
+
+server.tool(
+  "index-repository",
+  "Index a local repository (folder) to build a code knowledge graph. Scans all supported files, extracts code entities (functions, classes, interfaces), and tracks relationships.",
+  {
+    path: z.string().describe("Absolute path to the repository folder to index"),
+    watch: z.boolean().optional().default(false).describe("Enable file watching for real-time updates"),
+  },
+  async ({ path, watch: enableWatch }) => {
+    try {
+      // Check if already indexed
+      const existing = getContextByPath(path);
+      if (existing) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Context already indexed at ${path}.\n` +
+                `ID: ${existing.id}\n` +
+                `Files: ${existing.file_count}, Entities: ${existing.entity_count}\n` +
+                `Last indexed: ${existing.last_indexed_at ?? "never"}\n\n` +
+                `Use refresh-repository to re-scan changed files.`,
+            },
+          ],
+        };
+      }
+
+      // Index the repository
+      const result = await indexRepository(path, {
+        onProgress: () => {
+          // Could emit progress here if needed
+        },
+      });
+
+      // Enable watching if requested
+      if (enableWatch) {
+        try {
+          watchRepository(path);
+        } catch {
+          // Watch might fail if permissions issue, not critical
+        }
+      }
+
+      const lines = [
+        `Indexed context: ${result.context.name}`,
+        `Path: ${result.context.path}`,
+        `Context ID: ${result.context.id}`,
+        `Language: ${result.context.language ?? "Unknown"}`,
+        `Files indexed: ${result.stats.filesIndexed}`,
+        `Code entities extracted: ${result.stats.entitiesExtracted}`,
+        `Relations found: ${result.stats.relationsFound}`,
+      ];
+
+      if (result.stats.errors.length > 0) {
+        lines.push(`Errors: ${result.stats.errors.slice(0, 3).join("; ")}`);
+      }
+
+      if (enableWatch) {
+        lines.push(`Watching for changes: enabled`);
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error indexing context: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "refresh-repository",
+  "Re-scan an indexed repository to pick up new and changed files.",
+  {
+    path: z.string().describe("Absolute path to the repository folder"),
+  },
+  async ({ path }) => {
+    try {
+      const existing = getContextByPath(path);
+      if (!existing) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Context not found at ${path}.\nRun index-repository first.`,
+            },
+          ],
+        };
+      }
+
+      const result = await refreshRepository(path);
+
+      const lines = [
+        `Refreshed context: ${result.context.name}`,
+        `New/changed files indexed: ${result.stats.filesIndexed}`,
+        `Total entities: ${result.stats.entitiesExtracted}`,
+      ];
+
+      if (result.stats.errors.length > 0) {
+        lines.push(`Errors: ${result.stats.errors.slice(0, 3).join("; ")}`);
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error refreshing context: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "list-repositories",
+  "List all locally indexed repositories.",
+  {},
+  async () => {
+    try {
+      const contexts = listContexts();
+
+      if (contexts.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No contexts indexed yet.\nUse index-repository to index a local folder.",
+            },
+          ],
+        };
+      }
+
+      const formatted = contexts.map((ctx) => {
+        const status = `${ctx.file_count} files, ${ctx.entity_count} entities`;
+        const lastIndexed = ctx.last_indexed_at
+          ? `last indexed ${new Date(ctx.last_indexed_at).toLocaleDateString()}`
+          : "never indexed";
+        return `- ${ctx.name} (${ctx.language ?? "Unknown"})\n  Path: ${ctx.path}\n  ${status} — ${lastIndexed}`;
+      }).join("\n\n");
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${contexts.length} context ${contexts.length === 1 ? "indexed" : "indexed"}:\n\n${formatted}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "get-relevant-context",
+  "Get relevant code context for a file or entity. Returns related files, imports, and dependent code based on the knowledge graph.",
+  {
+    repositoryPath: z.string().describe("Path to the repository"),
+    filePath: z.string().optional().describe("Path to the file to get context for"),
+    entityName: z.string().optional().describe("Name of a specific entity (function, class) to find context for"),
+    query: z.string().optional().describe("Text search query across the codebase"),
+    maxResults: z.number().optional().default(15).describe("Maximum number of results to return"),
+    maxDistance: z.number().optional().default(3).describe("Maximum graph traversal depth"),
+  },
+  async ({ repositoryPath, filePath, entityName, query, maxResults = 15, maxDistance = 3 }) => {
+    try {
+      const ctx = getContextByPath(repositoryPath);
+      if (!ctx) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Context not indexed at ${repositoryPath}.\nRun index-repository first.`,
+            },
+          ],
+        };
+      }
+
+      // If filePath provided, get file ID
+      let fileId: string | undefined;
+      if (filePath) {
+        // Search for the file
+        const files = searchContextItems(filePath.split("/").pop() ?? filePath, ctx.id);
+        const matched = files.find((f) => f.path.endsWith(filePath) || f.path === filePath);
+        if (matched) {
+          fileId = matched.id;
+        }
+      }
+
+      // If entityName provided, find it
+      let entityId: string | undefined;
+      if (entityName) {
+        const entities = searchCodeEntities(entityName, ctx.id);
+        const matched = entities.find((e) => e.name === entityName);
+        if (matched) {
+          entityId = matched.id;
+        }
+      }
+
+      // Get relevant context
+      const results = getRelevantContext(
+        {
+          itemId: fileId,
+          entityId,
+          query: query ?? (entityName ?? filePath),
+        },
+        { maxResults, maxDistance }
+      );
+
+      if (results.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No relevant context found${entityName ? ` for "${entityName}"` : ""}${filePath ? ` in ${filePath}` : ""}.`,
+            },
+          ],
+        };
+      }
+
+      const lines: string[] = [
+        `# Relevant Context${entityName ? ` for ${entityName}` : ""}${filePath ? ` in ${filePath}` : ""}`,
+        `Found ${results.length} relevant ${results.length === 1 ? "item" : "items"}:\n`,
+      ];
+
+      for (const result of results) {
+        const score = Math.round(result.score * 100);
+        if (result.item) {
+          const ext = result.item.extension;
+          lines.push(`## ${result.item.name} ${score}% related`);
+          lines.push(`Path: ${result.item.path}`);
+          lines.push(`Type: ${ext} file`);
+          lines.push(`Lines: ${result.item.line_count}`);
+          // Include a snippet of content
+          const preview = (result.item.content ?? "").slice(0, 300).replace(/\n/g, " ");
+          lines.push(`Preview: ${preview}...`);
+        } else if (result.entity) {
+          lines.push(`## ${result.entity.name} (${result.entity.type}) ${score}% related`);
+          lines.push(`File: ${result.entity.item_id}`);
+          if (result.entity.signature) {
+            lines.push(`Signature: ${result.entity.signature}`);
+          }
+          lines.push(`Lines: ${result.entity.start_line}-${result.entity.end_line}`);
+        }
+        lines.push(`Reason: ${result.reason}\n`);
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error getting context: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "resolve-file-relations",
+  "Get all files and entities that a given file relates to (imports, dependencies, dependents).",
+  {
+    repositoryPath: z.string().describe("Path to the repository"),
+    filePath: z.string().describe("Path to the file to analyze"),
+    depth: z.number().optional().default(2).describe("Traversal depth for related files"),
+  },
+  async ({ repositoryPath, filePath, depth = 2 }) => {
+    try {
+      const ctx = getContextByPath(repositoryPath);
+      if (!ctx) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Context not indexed at ${repositoryPath}.\nRun index-repository first.`,
+            },
+          ],
+        };
+      }
+
+      // Find the file
+      const files = searchContextItems(filePath.split("/").pop() ?? filePath, ctx.id);
+      const matched = files.find((f) => f.path.endsWith(filePath) || f.path === filePath);
+      if (!matched) {
+        return {
+          content: [{ type: "text", text: `File not found: ${filePath}` }],
+          isError: true,
+        };
+      }
+
+      const file = matched;
+      const entities = getCodeEntitiesByItem(file.id);
+      const relations = getRelationsByItem(file.id);
+
+      let output = `# Relations for ${file.name}\n`;
+      output += `Path: ${file.path}\n`;
+      output += `Entities: ${entities.length}\n\n`;
+
+      if (entities.length > 0) {
+        output += `## Code Entities\n`;
+        for (const entity of entities) {
+          output += `- ${entity.type} ${entity.name} (lines ${entity.start_line}-${entity.end_line})\n`;
+        }
+        output += "\n";
+      }
+
+      if (relations.length > 0) {
+        output += `## Relationships (${relations.length})\n`;
+        // Group by relation type
+        const byType = new Map<string, typeof relations>();
+        for (const rel of relations) {
+          const existing = byType.get(rel.relation_type) ?? [];
+          existing.push(rel);
+          byType.set(rel.relation_type, existing);
+        }
+
+        for (const [type, rels] of byType) {
+          output += `### ${type} (${rels.length})\n`;
+          for (const rel of rels.slice(0, 10)) {
+            output += `- ${rel.relation_text ?? type}\n`;
+          }
+          if (rels.length > 10) {
+            output += `- ... and ${rels.length - 10} more\n`;
+          }
+        }
+      }
+
+      // Get related files
+      const relatedFiles = getRelatedItems(file.id, depth);
+      if (relatedFiles.length > 0) {
+        output += `\n## Related Files (${relatedFiles.length})\n`;
+        for (const { item: relatedFile, distance, relation } of relatedFiles.slice(0, 20)) {
+          output += `- ${relatedFile.name} (distance: ${distance}, via: ${relation.relation_type})\n`;
+        }
+      }
+
+      return { content: [{ type: "text", text: output }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error resolving relations: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "search-codebase",
+  "Search the indexed codebase for files or entities matching a query.",
+  {
+    repositoryPath: z.string().optional().describe("Path to the repository (optional, searches all if not provided)"),
+    query: z.string().describe("Search query"),
+    type: z.enum(["all", "files", "entities"]).optional().default("all").describe("What to search"),
+  },
+  async ({ repositoryPath, query, type = "all" }) => {
+    try {
+      let ctxId: string | undefined;
+      if (repositoryPath) {
+        const ctx = getContextByPath(repositoryPath);
+        if (!ctx) {
+          return {
+            content: [{ type: "text", text: `Context not found at ${repositoryPath}` }],
+            isError: true,
+          };
+        }
+        ctxId = ctx.id;
+      }
+
+      const results: string[] = [];
+
+      if (type === "all" || type === "files") {
+        const files = searchContextItems(query, ctxId);
+        if (files.length > 0) {
+          results.push(`## Files matching "${query}" (${files.length})\n`);
+          for (const file of files.slice(0, 20)) {
+            results.push(`- ${file.path} (${file.line_count} lines)`);
+          }
+          if (files.length > 20) results.push(`... and ${files.length - 20} more`);
+        }
+      }
+
+      if (type === "all" || type === "entities") {
+        const entities = searchCodeEntities(query, ctxId);
+        if (entities.length > 0) {
+          results.push(`\n## Entities matching "${query}" (${entities.length})\n`);
+          for (const entity of entities.slice(0, 20)) {
+            results.push(`- ${entity.type} ${entity.name} in ${entity.item_id}`);
+          }
+          if (entities.length > 20) results.push(`... and ${entities.length - 20} more`);
+        }
+      }
+
+      if (results.length === 0) {
+        return {
+          content: [{ type: "text", text: `No results found for "${query}"` }],
+        };
+      }
+
+      return { content: [{ type: "text", text: results.join("\n") }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error searching: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "get-edit-context",
+  "Get context suggestions when AI is about to edit a file. Returns related files, entities, and smart suggestions for what else might need to change.",
+  {
+    repositoryPath: z.string().describe("Path to the repository"),
+    filePath: z.string().describe("Path to the file being edited"),
+    maxRelated: z.number().optional().default(10).describe("Max number of related files to return"),
+  },
+  async ({ repositoryPath, filePath, maxRelated = 10 }) => {
+    try {
+      const { getEditContext } = await import("../hooks/index.js");
+      const result = getEditContext(repositoryPath, filePath, { maxRelated });
+
+      if (!result.item) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `File not found in repository: ${filePath}\nIndex the repository first with index-repository.`,
+            },
+          ],
+        };
+      }
+
+      let output = `# Edit Context for ${result.item.name}\n\n`;
+
+      output += `## Current File\n`;
+      output += `Path: ${result.item.path}\n`;
+      output += `Lines: ${result.item.line_count}\n`;
+      output += `Entities: ${result.entities.length}\n\n`;
+
+      if (result.entities.length > 0) {
+        output += `### Entities in this file\n`;
+        for (const entity of result.entities.slice(0, 20)) {
+          output += `- ${entity.type} ${entity.name} (lines ${entity.start_line}-${entity.end_line})\n`;
+        }
+        if (result.entities.length > 20) {
+          output += `- ... and ${result.entities.length - 20} more\n`;
+        }
+        output += "\n";
+      }
+
+      if (result.relatedItems.length > 0) {
+        output += `## Related Files (${result.relatedItems.length})\n`;
+        output += `These files may need attention when editing ${result.item.name}:\n\n`;
+        for (const { item, distance, via } of result.relatedItems.slice(0, maxRelated)) {
+          output += `### ${item.name} ${distance > 1 ? `(distance: ${distance})` : ""}\n`;
+          output += `- Path: ${item.path}\n`;
+          output += `- Related via: ${via}\n`;
+        }
+        output += "\n";
+      }
+
+      if (result.suggestions.length > 0) {
+        output += `## Smart Suggestions\n`;
+        for (const suggestion of result.suggestions) {
+          output += `- ${suggestion}\n`;
+        }
+      }
+
+      return { content: [{ type: "text", text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error getting edit context: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "watch-repository-hooks",
+  "Start watching a repository with hooks for automatic knowledge graph updates.",
+  {
+    repositoryPath: z.string().describe("Path to the repository to watch"),
+    enableAutoUpdate: z.boolean().optional().default(true).describe("Enable automatic graph updates on file changes"),
+  },
+  async ({ repositoryPath, enableAutoUpdate = true }) => {
+    try {
+      const { watchContextWithHooks, createGraphUpdateHook } = await import("../hooks/index.js");
+
+      const ctx = getContextByPath(repositoryPath);
+      if (!ctx) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Context not indexed at ${repositoryPath}.\nRun index-repository first.`,
+            },
+          ],
+        };
+      }
+
+      const hooks = enableAutoUpdate ? [createGraphUpdateHook(repositoryPath)] : [];
+      watchContextWithHooks(repositoryPath, hooks);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Watching ${repositoryPath} with ${hooks.length} hook(s) enabled.\nKnowledge graph will auto-update on file changes.`,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error watching repository: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
 
 const transport = new StdioServerTransport();
 registerCloudTools(server, "context");

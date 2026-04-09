@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from "crypto";
-import type { Database } from "bun:sqlite";
+import type { SqliteAdapter } from "@hasna/cloud";
 import { getDatabase } from "./database.js";
 
 export interface DocumentVersion {
@@ -24,17 +24,16 @@ export function saveDocumentVersion(
     title?: string | null;
     content: string;
   },
-  db?: Database
+  db?: SqliteAdapter
 ): DocumentVersion | null {
   const database = db ?? getDatabase();
   const hash = hashContent(input.content);
 
   // Check if this exact content already exists
-  const existing = database
-    .query<{ content_hash: string; version_number: number }, [string]>(
-      "SELECT content_hash, version_number FROM document_versions WHERE document_id = ? ORDER BY version_number DESC LIMIT 1"
-    )
-    .get(input.document_id);
+  const existing = database.get(
+    "SELECT content_hash, version_number FROM document_versions WHERE document_id = ? ORDER BY version_number DESC LIMIT 1",
+    input.document_id
+  ) as { content_hash: string; version_number: number } | null;
 
   if (existing && existing.content_hash === hash) {
     return null; // No change
@@ -73,48 +72,48 @@ export function saveDocumentVersion(
 
 export function getDocumentVersions(
   documentId: string,
-  db?: Database
+  db?: SqliteAdapter
 ): DocumentVersion[] {
   const database = db ?? getDatabase();
   return database
-    .query<DocumentVersion, [string]>(
-      "SELECT * FROM document_versions WHERE document_id = ? ORDER BY version_number DESC"
-    )
-    .all(documentId);
+    .all(
+      "SELECT * FROM document_versions WHERE document_id = ? ORDER BY version_number DESC",
+      documentId
+    ) as DocumentVersion[];
 }
 
 export function getDocumentVersionCount(
   documentId: string,
-  db?: Database
+  db?: SqliteAdapter
 ): number {
   const database = db ?? getDatabase();
   return (
     database
-      .query<{ count: number }, [string]>(
-        "SELECT COUNT(*) AS count FROM document_versions WHERE document_id = ?"
-      )
-      .get(documentId)?.count ?? 0
+      .get(
+        "SELECT COUNT(*) AS count FROM document_versions WHERE document_id = ?",
+        documentId
+      )?.count ?? 0
   );
 }
 
 export function getLatestVersion(
   documentId: string,
-  db?: Database
+  db?: SqliteAdapter
 ): DocumentVersion | null {
   const database = db ?? getDatabase();
   return (
     database
-      .query<DocumentVersion, [string]>(
-        "SELECT * FROM document_versions WHERE document_id = ? ORDER BY version_number DESC LIMIT 1"
-      )
-      .get(documentId) ?? null
+      .get(
+        "SELECT * FROM document_versions WHERE document_id = ? ORDER BY version_number DESC LIMIT 1",
+        documentId
+      ) as DocumentVersion | null ?? null
   );
 }
 
 export function pruneOldVersions(
   documentId: string,
   keepCount = 5,
-  db?: Database
+  db?: SqliteAdapter
 ): void {
   const database = db ?? getDatabase();
   database.run(

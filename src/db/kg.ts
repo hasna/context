@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { Database } from "bun:sqlite";
+import { SqliteAdapter } from "@hasna/cloud";
 import { getDatabase } from "./database.js";
 
 export type NodeType =
@@ -81,16 +81,16 @@ export function upsertNode(
     library_id?: string;
     metadata?: Record<string, unknown>;
   },
-  db?: Database
+  db?: SqliteAdapter
 ): KgNode {
   const database = db ?? getDatabase();
   const now = new Date().toISOString();
 
-  const existing = database
-    .query<Record<string, unknown>, [string, string]>(
-      "SELECT * FROM kg_nodes WHERE type = ? AND name = ?"
-    )
-    .get(input.type, input.name);
+  const existing = database.get(
+    "SELECT * FROM kg_nodes WHERE type = ? AND name = ?",
+    input.type,
+    input.name
+  ) as Record<string, unknown> | null;
 
   if (existing) {
     database.run(
@@ -103,11 +103,10 @@ export function upsertNode(
       ]
     );
     return rowToNode(
-      database
-        .query<Record<string, unknown>, [string]>(
-          "SELECT * FROM kg_nodes WHERE id = ?"
-        )
-        .get(existing["id"] as string)!
+      database.get(
+        "SELECT * FROM kg_nodes WHERE id = ?",
+        existing["id"] as string
+      ) as Record<string, unknown>
     );
   }
 
@@ -127,9 +126,10 @@ export function upsertNode(
   );
 
   return rowToNode(
-    database
-      .query<Record<string, unknown>, [string]>("SELECT * FROM kg_nodes WHERE id = ?")
-      .get(id)!
+    database.get("SELECT * FROM kg_nodes WHERE id = ?", id) as Record<
+      string,
+      unknown
+    >
   );
 }
 
@@ -141,16 +141,17 @@ export function upsertEdge(
     weight?: number;
     metadata?: Record<string, unknown>;
   },
-  db?: Database
+  db?: SqliteAdapter
 ): KgEdge {
   const database = db ?? getDatabase();
   const now = new Date().toISOString();
 
-  const existing = database
-    .query<Record<string, unknown>, [string, string, string]>(
-      "SELECT * FROM kg_edges WHERE source_id = ? AND target_id = ? AND relation = ?"
-    )
-    .get(input.source_id, input.target_id, input.relation);
+  const existing = database.get(
+    "SELECT * FROM kg_edges WHERE source_id = ? AND target_id = ? AND relation = ?",
+    input.source_id,
+    input.target_id,
+    input.relation
+  ) as Record<string, unknown> | null;
 
   if (existing) {
     database.run(
@@ -162,11 +163,10 @@ export function upsertEdge(
       ]
     );
     return rowToEdge(
-      database
-        .query<Record<string, unknown>, [string]>(
-          "SELECT * FROM kg_edges WHERE id = ?"
-        )
-        .get(existing["id"] as string)!
+      database.get(
+        "SELECT * FROM kg_edges WHERE id = ?",
+        existing["id"] as string
+      ) as Record<string, unknown>
     );
   }
 
@@ -186,37 +186,36 @@ export function upsertEdge(
   );
 
   return rowToEdge(
-    database
-      .query<Record<string, unknown>, [string]>("SELECT * FROM kg_edges WHERE id = ?")
-      .get(id)!
+    database.get("SELECT * FROM kg_edges WHERE id = ?", id) as Record<
+      string,
+      unknown
+    >
   );
 }
 
 export function getNodeByLibraryId(
   libraryId: string,
-  db?: Database
+  db?: SqliteAdapter
 ): KgNode | null {
   const database = db ?? getDatabase();
-  const row = database
-    .query<Record<string, unknown>, [string]>(
-      "SELECT * FROM kg_nodes WHERE library_id = ? LIMIT 1"
-    )
-    .get(libraryId);
+  const row = database.get(
+    "SELECT * FROM kg_nodes WHERE library_id = ? LIMIT 1",
+    libraryId
+  ) as Record<string, unknown> | null;
   return row ? rowToNode(row) : null;
 }
 
 export function getRelatedNodes(
   nodeId: string,
   relation?: EdgeRelation,
-  db?: Database
+  db?: SqliteAdapter
 ): KgNodeWithRelations {
   const database = db ?? getDatabase();
 
-  const node = database
-    .query<Record<string, unknown>, [string]>(
-      "SELECT * FROM kg_nodes WHERE id = ?"
-    )
-    .get(nodeId);
+  const node = database.get(
+    "SELECT * FROM kg_nodes WHERE id = ?",
+    nodeId
+  ) as Record<string, unknown> | null;
 
   if (!node) throw new Error(`KG node not found: ${nodeId}`);
 
@@ -239,20 +238,18 @@ export function getRelatedNodes(
   }
 
   const outgoing = relation
-    ? database
-        .query<Record<string, unknown>, [string, string]>(outgoingQuery)
-        .all(nodeId, relation)
-    : database
-        .query<Record<string, unknown>, [string]>(outgoingQuery)
-        .all(nodeId);
+    ? (database.all(outgoingQuery, nodeId, relation) as Record<
+        string,
+        unknown
+      >[])
+    : (database.all(outgoingQuery, nodeId) as Record<string, unknown>[]);
 
   const incoming = relation
-    ? database
-        .query<Record<string, unknown>, [string, string]>(incomingQuery)
-        .all(nodeId, relation)
-    : database
-        .query<Record<string, unknown>, [string]>(incomingQuery)
-        .all(nodeId);
+    ? (database.all(incomingQuery, nodeId, relation) as Record<
+        string,
+        unknown
+      >[])
+    : (database.all(incomingQuery, nodeId) as Record<string, unknown>[]);
 
   const relations: KgNodeWithRelations["relations"] = [];
 
@@ -293,22 +290,18 @@ export function getRelatedNodes(
   return { ...rowToNode(node), relations };
 }
 
-export function searchNodes(query: string, db?: Database): KgNode[] {
+export function searchNodes(query: string, db?: SqliteAdapter): KgNode[] {
   const database = db ?? getDatabase();
-  return database
-    .query<Record<string, unknown>, [string, string]>(
-      "SELECT * FROM kg_nodes WHERE name LIKE ? OR description LIKE ? ORDER BY name LIMIT 20"
-    )
-    .all(`%${query}%`, `%${query}%`)
-    .map(rowToNode);
+  return (database.all(
+    "SELECT * FROM kg_nodes WHERE name LIKE ? OR description LIKE ? ORDER BY name LIMIT 20",
+    `%${query}%`,
+    `%${query}%`
+  ) as Record<string, unknown>[]).map(rowToNode);
 }
 
-export function listNodes(db?: Database): KgNode[] {
+export function listNodes(db?: SqliteAdapter): KgNode[] {
   const database = db ?? getDatabase();
-  return database
-    .query<Record<string, unknown>, []>(
-      "SELECT * FROM kg_nodes ORDER BY type ASC, name ASC"
-    )
-    .all()
-    .map(rowToNode);
+  return (database.all(
+    "SELECT * FROM kg_nodes ORDER BY type ASC, name ASC"
+  ) as Record<string, unknown>[]).map(rowToNode);
 }

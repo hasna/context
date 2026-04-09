@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import { SqliteAdapter } from "@hasna/cloud";
 import { getDatabase } from "./database.js";
 import type { SearchResult } from "../types/index.js";
 
@@ -119,7 +119,7 @@ export function saveEmbedding(
   chunkId: string,
   model: string,
   embedding: Float32Array,
-  db?: Database
+  db?: SqliteAdapter
 ): void {
   const database = db ?? getDatabase();
   const blob = Buffer.from(embedding.buffer);
@@ -137,14 +137,13 @@ export function saveEmbedding(
  */
 export function getEmbedding(
   chunkId: string,
-  db?: Database
+  db?: SqliteAdapter
 ): Float32Array | null {
   const database = db ?? getDatabase();
-  const row = database
-    .query<{ embedding: Buffer; dimensions: number }, [string]>(
-      "SELECT embedding, dimensions FROM chunk_embeddings WHERE chunk_id = ?"
-    )
-    .get(chunkId);
+  const row = database.get(
+    "SELECT embedding, dimensions FROM chunk_embeddings WHERE chunk_id = ?",
+    chunkId
+  ) as { embedding: Buffer; dimensions: number } | null;
 
   if (!row) return null;
   return new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.dimensions);
@@ -173,7 +172,7 @@ export function semanticSearch(
   queryEmbedding: Float32Array,
   libraryId: string | undefined,
   limit: number,
-  db?: Database
+  db?: SqliteAdapter
 ): SearchResult[] {
   const database = db ?? getDatabase();
 
@@ -201,21 +200,19 @@ export function semanticSearch(
     params = [];
   }
 
-  const rows = database
-    .query<
-      {
-        chunk_id: string;
-        library_id: string;
-        document_id: string;
-        content: string;
-        url: string | null;
-        title: string | null;
-        embedding: Buffer;
-        dimensions: number;
-      },
-      string[]
-    >(sql)
-    .all(...params);
+  const rows = database.all(
+    sql,
+    ...params
+  ) as Array<{
+    chunk_id: string;
+    library_id: string;
+    document_id: string;
+    content: string;
+    url: string | null;
+    title: string | null;
+    embedding: Buffer;
+    dimensions: number;
+  }>;
 
   const scored = rows.map((row) => {
     const vec = new Float32Array(
@@ -243,21 +240,19 @@ export function semanticSearch(
  */
 export function embeddingCoverage(
   libraryId: string,
-  db?: Database
+  db?: SqliteAdapter
 ): { total: number; embedded: number } {
   const database = db ?? getDatabase();
   const total =
-    database
-      .query<{ count: number }, [string]>(
-        "SELECT COUNT(*) AS count FROM chunks WHERE library_id = ?"
-      )
-      .get(libraryId)?.count ?? 0;
+    (database.get(
+      "SELECT COUNT(*) AS count FROM chunks WHERE library_id = ?",
+      libraryId
+    ) as { count: number } | null)?.count ?? 0;
   const embedded =
-    database
-      .query<{ count: number }, [string]>(
-        `SELECT COUNT(*) AS count FROM chunk_embeddings ce
-         JOIN chunks c ON c.id = ce.chunk_id WHERE c.library_id = ?`
-      )
-      .get(libraryId)?.count ?? 0;
+    (database.get(
+      `SELECT COUNT(*) AS count FROM chunk_embeddings ce
+         JOIN chunks c ON c.id = ce.chunk_id WHERE c.library_id = ?`,
+      libraryId
+    ) as { count: number } | null)?.count ?? 0;
   return { total, embedded };
 }

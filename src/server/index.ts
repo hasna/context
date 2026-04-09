@@ -124,21 +124,12 @@ async function handle(req: Request): Promise<Response> {
     // GET /api/stats
     if (method === "GET" && path === "/api/stats") {
       const db = getDatabase();
-      const libCount = db
-        .query<{ count: number }, []>(
-          "SELECT COUNT(*) AS count FROM libraries"
-        )
-        .get()?.count ?? 0;
-      const docCount = db
-        .query<{ count: number }, []>(
-          "SELECT COUNT(*) AS count FROM documents"
-        )
-        .get()?.count ?? 0;
-      const chunkCount = db
-        .query<{ count: number }, []>(
-          "SELECT COUNT(*) AS count FROM chunks"
-        )
-        .get()?.count ?? 0;
+      const libCount =
+        db.get("SELECT COUNT(*) AS count FROM libraries")?.count ?? 0;
+      const docCount =
+        db.get("SELECT COUNT(*) AS count FROM documents")?.count ?? 0;
+      const chunkCount =
+        db.get("SELECT COUNT(*) AS count FROM chunks")?.count ?? 0;
       return json({ libraries: libCount, documents: docCount, chunks: chunkCount });
     }
 
