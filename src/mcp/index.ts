@@ -24,6 +24,36 @@ import { registerLibraryTools } from "./library-tools.js";
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
 
+function printHelp(): void {
+  console.log(`Usage: context-mcp [options]
+
+Start the open-context MCP server over stdio.
+
+Options:
+  -V, --version  output the version number
+  -h, --help     display help for command
+`);
+}
+
+function handleMetaArgs(): boolean {
+  const args = process.argv.slice(2);
+  if (args.includes("-V") || args.includes("--version")) {
+    console.log(pkg.version);
+    return true;
+  }
+
+  if (args.includes("-h") || args.includes("--help")) {
+    printHelp();
+    return true;
+  }
+
+  return false;
+}
+
+if (handleMetaArgs()) {
+  process.exit(0);
+}
+
 const server = new McpServer({ name: "context", version: pkg.version });
 
 // --- in-memory agent registry ---

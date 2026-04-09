@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from "module";
 import { getDatabase, getDbPath } from "../db/database.js";
 import {
   createLibrary,
@@ -11,6 +12,42 @@ import { searchChunks } from "../db/chunks.js";
 import { crawlLibrary } from "../crawler/index.js";
 
 const DEFAULT_PORT = 19431;
+const require = createRequire(import.meta.url);
+const pkg = require("../../package.json") as { version: string };
+
+function printHelp(): void {
+  console.log(`Usage: context-serve [options]
+
+Start the open-context HTTP API server.
+
+Options:
+  -V, --version  output the version number
+  -h, --help     display help for command
+
+Environment:
+  CONTEXT_PORT   Port to bind the HTTP server (default: ${DEFAULT_PORT})
+  PORT           Fallback port variable
+`);
+}
+
+function handleMetaArgs(): boolean {
+  const args = process.argv.slice(2);
+  if (args.includes("-V") || args.includes("--version")) {
+    console.log(pkg.version);
+    return true;
+  }
+
+  if (args.includes("-h") || args.includes("--help")) {
+    printHelp();
+    return true;
+  }
+
+  return false;
+}
+
+if (handleMetaArgs()) {
+  process.exit(0);
+}
 
 function getPort(): number {
   const env = process.env["CONTEXT_PORT"] ?? process.env["PORT"];
