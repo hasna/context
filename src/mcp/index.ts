@@ -20,7 +20,7 @@ import {
   getRelevantContext,
 } from "../db/repositories.js";
 import { registerLibraryTools } from "./library-tools.js";
-import { isHttpMode, resolveMcpHttpPort, startMcpHttpServer } from "./http.js";
+import { isStdioMode, resolveMcpHttpPort, startMcpHttpServer } from "./http.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
@@ -658,13 +658,14 @@ return server;
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  if (isHttpMode(args)) {
-    startMcpHttpServer({ name: "context", port: resolveMcpHttpPort(args), buildServer });
+  if (isStdioMode(args)) {
+    const transport = new StdioServerTransport();
+    await buildServer().connect(transport);
     return;
   }
 
-  const transport = new StdioServerTransport();
-  await buildServer().connect(transport);
+  // Default: shared Streamable HTTP server (one process per MCP, many agents).
+  startMcpHttpServer({ name: "context", port: resolveMcpHttpPort(args), buildServer });
 }
 
 const isDirectRun =
