@@ -25,6 +25,21 @@ context-mcp
 
 12 tools available.
 
+## HTTP mode
+
+Long-lived Streamable HTTP transport (stateless, bind `127.0.0.1` only):
+
+```bash
+context-mcp --http              # default port 8810
+context-mcp --http --port 8810
+MCP_HTTP=1 context-mcp
+```
+
+- Health: `GET http://127.0.0.1:8810/health`
+- MCP: `http://127.0.0.1:8810/mcp`
+
+The REST server (`context-serve`) also exposes `/health` and `/mcp` when running.
+
 ## REST API
 
 ```bash

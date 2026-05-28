@@ -20,6 +20,7 @@ import {
   getRelevantContext,
 } from "../db/repositories.js";
 import { registerLibraryTools } from "./library-tools.js";
+import { isHttpMode, resolveMcpHttpPort, startMcpHttpServer } from "./http.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
@@ -54,6 +55,7 @@ if (handleMetaArgs()) {
   process.exit(0);
 }
 
+export function buildServer(): McpServer {
 const server = new McpServer({ name: "context", version: pkg.version });
 
 // --- in-memory agent registry ---
@@ -650,6 +652,29 @@ server.tool(
   }
 );
 
-const transport = new StdioServerTransport();
 registerCloudTools(server, "context");
-await server.connect(transport);
+return server;
+}
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  if (isHttpMode(args)) {
+    startMcpHttpServer({ name: "context", port: resolveMcpHttpPort(args), buildServer });
+    return;
+  }
+
+  const transport = new StdioServerTransport();
+  await buildServer().connect(transport);
+}
+
+const isDirectRun =
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith("mcp/index.ts") ||
+  process.argv[1]?.endsWith("mcp/index.js");
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}

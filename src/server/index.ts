@@ -10,6 +10,8 @@ import {
 } from "../db/libraries.js";
 import { searchChunks } from "../db/chunks.js";
 import { crawlLibrary } from "../crawler/index.js";
+import { handleMcpRequest, healthPayload } from "../mcp/http.js";
+import { buildServer } from "../mcp/index.js";
 
 const DEFAULT_PORT = 19431;
 const require = createRequire(import.meta.url);
@@ -86,6 +88,13 @@ async function handle(req: Request): Promise<Response> {
   }
 
   try {
+    if (method === "GET" && path === "/health") {
+      return json(healthPayload("context"));
+    }
+    if (path === "/mcp") {
+      return handleMcpRequest(req, buildServer);
+    }
+
     // GET /api/health
     if (method === "GET" && path === "/api/health") {
       return json({ status: "ok", db: getDbPath() });
