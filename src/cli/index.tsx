@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { registerEventsCommands } from "@hasna/events/commander";
 import { Command } from "commander";
 import chalk from "chalk";
 import { createRequire } from "module";
@@ -510,5 +511,6 @@ program
     }
     console.log();
   });
+registerEventsCommands(program, { source: "context" });
 
 program.parse();
