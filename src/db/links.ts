@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { SqliteAdapter } from "@hasna/cloud";
+import type { Database } from "./database.js";
 import { getDatabase } from "./database.js";
 
 export type LinkType =
@@ -9,6 +9,8 @@ export type LinkType =
   | "changelog"
   | "examples"
   | "api"
+  | "openapi"
+  | "llms"
   | "tutorial"
   | "playground"
   | "other";
@@ -29,7 +31,7 @@ export function addLink(
     type: LinkType;
     label?: string;
   },
-  db?: SqliteAdapter
+  db?: Database
 ): LibraryLink {
   const database = db ?? getDatabase();
   const id = randomUUID();
@@ -57,7 +59,7 @@ export function addLink(
   );
 }
 
-export function getLinks(libraryId: string, db?: SqliteAdapter): LibraryLink[] {
+export function getLinks(libraryId: string, db?: Database): LibraryLink[] {
   const database = db ?? getDatabase();
   return database.all(
     "SELECT * FROM library_links WHERE library_id = ? ORDER BY type ASC",
@@ -65,7 +67,7 @@ export function getLinks(libraryId: string, db?: SqliteAdapter): LibraryLink[] {
   ) as LibraryLink[];
 }
 
-export function deleteLink(id: string, db?: SqliteAdapter): void {
+export function deleteLink(id: string, db?: Database): void {
   const database = db ?? getDatabase();
   database.run("DELETE FROM library_links WHERE id = ?", [id]);
 }
@@ -73,7 +75,7 @@ export function deleteLink(id: string, db?: SqliteAdapter): void {
 export function syncLinks(
   libraryId: string,
   links: Array<{ type: LinkType; url: string; label?: string }>,
-  db?: SqliteAdapter
+  db?: Database
 ): void {
   const database = db ?? getDatabase();
   for (const link of links) {

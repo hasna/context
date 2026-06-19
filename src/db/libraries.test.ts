@@ -4,10 +4,12 @@ import {
   createLibrary,
   getLibraryById,
   getLibraryBySlug,
+  resolveLibraryReference,
   listLibraries,
   searchLibraries,
   deleteLibrary,
   updateLibraryCounts,
+  updateLibraryMetadata,
 } from "./libraries.js";
 
 beforeEach(() => {
@@ -24,6 +26,8 @@ describe("createLibrary", () => {
     const lib = createLibrary({ name: "React" });
     expect(lib.name).toBe("React");
     expect(lib.slug).toBe("react");
+    expect(lib.source_type).toBe("docs");
+    expect(lib.source_url).toBeNull();
     expect(lib.chunk_count).toBe(0);
     expect(lib.document_count).toBe(0);
   });
@@ -45,6 +49,41 @@ describe("createLibrary", () => {
     expect(lib.github_repo).toBe("expressjs/express");
     expect(lib.docs_url).toBe("https://expressjs.com");
     expect(lib.description).toBe("Fast web framework");
+    expect(lib.source_type).toBe("docs");
+    expect(lib.source_url).toBe("https://expressjs.com");
+  });
+
+  it("normalizes explicit source metadata", () => {
+    const lib = createLibrary({
+      name: "Example API",
+      docs_url: "https://example.com/swagger.yaml",
+      source_type: "open-api",
+      freshness_days: 3,
+      priority: 20,
+    });
+    expect(lib.source_type).toBe("openapi");
+    expect(lib.source_url).toBe("https://example.com/swagger.yaml");
+    expect(lib.freshness_days).toBe(3);
+    expect(lib.priority).toBe(20);
+  });
+
+  it("throws on unknown source types", () => {
+    expect(() =>
+      createLibrary({
+        name: "Bad Source",
+        docs_url: "https://example.com/docs",
+        source_type: "whatever",
+      })
+    ).toThrow("Unknown documentation source type");
+  });
+
+  it("throws on invalid documentation URLs before storing source metadata", () => {
+    expect(() =>
+      createLibrary({
+        name: "Bad URL",
+        docs_url: "not-a-url",
+      })
+    ).toThrow('Invalid docs_url "not-a-url"');
   });
 
   it("throws on duplicate slug", () => {
@@ -104,6 +143,26 @@ describe("searchLibraries", () => {
     const results = searchLibraries("next");
     expect(results.length).toBeGreaterThan(0);
   });
+
+  it("finds and resolves versioned documentation libraries", () => {
+    createLibrary({
+      name: "React",
+      slug: "react-18",
+      version: "18.2.0",
+      docs_url: "https://react.dev/v18",
+    });
+    createLibrary({
+      name: "React",
+      slug: "react-19",
+      version: "19.0.0",
+      docs_url: "https://react.dev/v19",
+    });
+
+    expect(searchLibraries("react 18")[0]?.slug).toBe("react-18");
+    expect(resolveLibraryReference("react", { version: "18" }).slug).toBe("react-18");
+    expect(resolveLibraryReference("/context/react-19@19").slug).toBe("react-19");
+    expect(() => resolveLibraryReference("react-19", { version: "18" })).toThrow("not found");
+  });
 });
 
 describe("deleteLibrary", () => {
@@ -129,5 +188,33 @@ describe("updateLibraryCounts", () => {
     updateLibraryCounts(lib.id);
     const updated = getLibraryById(lib.id);
     expect(updated.document_count).toBe(1);
+  });
+});
+
+describe("updateLibraryMetadata", () => {
+  it("reconciles source metadata for an existing library", () => {
+    const lib = createLibrary({
+      name: "Seeded API",
+      docs_url: "https://old.example.com/docs",
+      source_type: "docs",
+      freshness_days: 7,
+      priority: 0,
+    });
+
+    const updated = updateLibraryMetadata(lib.id, {
+      name: "Seeded API",
+      description: "Updated API docs",
+      docs_url: "https://new.example.com/openapi.json",
+      source_type: "openapi",
+      freshness_days: 1,
+      priority: 25,
+    });
+
+    expect(updated.description).toBe("Updated API docs");
+    expect(updated.docs_url).toBe("https://new.example.com/openapi.json");
+    expect(updated.source_url).toBe("https://new.example.com/openapi.json");
+    expect(updated.source_type).toBe("openapi");
+    expect(updated.freshness_days).toBe(1);
+    expect(updated.priority).toBe(25);
   });
 });

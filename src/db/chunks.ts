@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { SqliteAdapter as Database } from "@hasna/cloud";
+import type { Database } from "./database.js";
 import { getDatabase } from "./database.js";
 import type { Chunk, SearchResult } from "../types/index.js";
 

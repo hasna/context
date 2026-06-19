@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from "crypto";
-import type { SqliteAdapter } from "@hasna/cloud";
+import type { Database } from "./database.js";
 import { getDatabase } from "./database.js";
 
 export interface DocumentVersion {
@@ -24,7 +24,7 @@ export function saveDocumentVersion(
     title?: string | null;
     content: string;
   },
-  db?: SqliteAdapter
+  db?: Database
 ): DocumentVersion | null {
   const database = db ?? getDatabase();
   const hash = hashContent(input.content);
@@ -72,7 +72,7 @@ export function saveDocumentVersion(
 
 export function getDocumentVersions(
   documentId: string,
-  db?: SqliteAdapter
+  db?: Database
 ): DocumentVersion[] {
   const database = db ?? getDatabase();
   return database
@@ -84,7 +84,7 @@ export function getDocumentVersions(
 
 export function getDocumentVersionCount(
   documentId: string,
-  db?: SqliteAdapter
+  db?: Database
 ): number {
   const database = db ?? getDatabase();
   return (
@@ -98,7 +98,7 @@ export function getDocumentVersionCount(
 
 export function getLatestVersion(
   documentId: string,
-  db?: SqliteAdapter
+  db?: Database
 ): DocumentVersion | null {
   const database = db ?? getDatabase();
   return (
@@ -113,7 +113,7 @@ export function getLatestVersion(
 export function pruneOldVersions(
   documentId: string,
   keepCount = 5,
-  db?: SqliteAdapter
+  db?: Database
 ): void {
   const database = db ?? getDatabase();
   database.run(

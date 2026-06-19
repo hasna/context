@@ -4,16 +4,18 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { createRequire } from "module";
 import { join } from "path";
+import { existsSync } from "fs";
 import {
   listLibraries,
   getLibraryBySlug,
 } from "../db/libraries.js";
-import { getDefaultCrawler } from "../crawler/index.js";
-import { getDbPath } from "../db/database.js";
+import { getDefaultExternalRetriever } from "../sources/refresh.js";
+import { getDatabase, getDbPath } from "../db/database.js";
 import { getRelatedNodes, listNodes, searchNodes } from "../db/kg.js";
 import {
   getEmbeddingConfig,
 } from "../db/embeddings.js";
+import { getAiProviderStatuses } from "../ai/providers.js";
 import {
   indexRepository,
   refreshRepository,
@@ -27,7 +29,13 @@ import {
   searchContextItems,
   searchCodeEntities,
 } from "../db/repositories.js";
+import { registerStorageCommands } from "./storage.js";
 import { registerLibraryCommands } from "./library-commands.js";
+import { registerAiCommands } from "./ai-commands.js";
+import { registerWebhookCommands } from "./webhook-commands.js";
+import { registerLiveCommands } from "./live-commands.js";
+import { registerPublishCommands } from "./publish-commands.js";
+import { registerVerifyCommands } from "./verify-commands.js";
 import { formatDate } from "./format.js";
 
 const require = createRequire(import.meta.url);
@@ -38,6 +46,12 @@ const program = new Command()
   .description("Self-hosted documentation context server for AI coding agents")
   .version(pkg.version);
 registerLibraryCommands(program);
+registerStorageCommands(program);
+registerAiCommands(program);
+registerWebhookCommands(program);
+registerLiveCommands(program);
+registerPublishCommands(program);
+registerVerifyCommands(program);
 
 // ─── context kg ───────────────────────────────────────────────────────────────
 
@@ -65,11 +79,10 @@ program
 
     if (opts.library) {
       const lib = getLibraryBySlug(opts.library);
-      const { getDatabase } = require("../db/database.js") as typeof import("../db/database.js");
       const db = getDatabase();
       const node = db
         .get(
-          "SELECT id FROM kg_nodes WHERE library_id = ? LIMIT 1",
+          "SELECT id FROM kg_nodes WHERE library_id = ? AND type = 'library' LIMIT 1",
           lib.id
         );
 
@@ -128,10 +141,12 @@ program
   .description("Show database info and stats")
   .action(() => {
     const db = getDbPath();
-    const libraries = listLibraries();
+    const libraries = db === ":memory:" || existsSync(db) ? listLibraries() : [];
     const totalChunks = libraries.reduce((s, l) => s + l.chunk_count, 0);
     const totalDocs = libraries.reduce((s, l) => s + l.document_count, 0);
     const config = getEmbeddingConfig();
+    const providers = getAiProviderStatuses();
+    const configuredProviders = providers.filter((provider) => provider.configured);
 
     console.log(chalk.bold("\nopen-context status\n"));
     console.log(`  DB:              ${db}`);
@@ -139,7 +154,8 @@ program
     console.log(`  Pages:           ${totalDocs}`);
     console.log(`  Chunks:          ${totalChunks}`);
     console.log(`  Embedding:       ${config ? `${config.provider} / ${config.model}` : "disabled"}`);
-    console.log(`  Default crawler: ${getDefaultCrawler()}`);
+    console.log(`  AI SDK:          ${configuredProviders.length > 0 ? configuredProviders.map((provider) => provider.id).join(", ") : "no AI keys"}`);
+    console.log(`  Default retriever: ${getDefaultExternalRetriever()}`);
     console.log();
   });
 
@@ -149,9 +165,9 @@ program
   .command("serve")
   .description("Start the HTTP API server")
   .option("-p, --port <n>", "Port (default: 19431)")
-  .action((opts: { port?: string }) => {
+  .action(async (opts: { port?: string }) => {
     if (opts.port) process.env["CONTEXT_PORT"] = opts.port;
-    import("../server/index.js").catch((err: unknown) => {
+    import("../server/index.js").then(({ startServer }) => startServer()).catch((err: unknown) => {
       console.error(chalk.red("Failed to start server:"), err);
       process.exit(1);
     });
@@ -511,6 +527,9 @@ program
     }
     console.log();
   });
-registerEventsCommands(program, { source: "context" });
+registerEventsCommands(program, {
+  source: "context",
+  webhooksCommandName: "event-webhooks",
+});
 
 program.parse();

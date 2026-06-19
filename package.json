@@ -1,7 +1,7 @@
 {
   "name": "@hasna/context",
-  "version": "0.1.14",
-  "description": "Self-hosted documentation context server for AI coding agents — crawl, index, and query library docs via MCP + CLI + HTTP",
+  "version": "0.1.50",
+  "description": "Self-hosted documentation context server for AI coding agents — refresh, index, and query source docs via MCP + CLI + HTTP",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,6 +14,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage.d.ts",
+      "import": "./dist/storage.js"
     }
   },
   "files": [
@@ -22,14 +26,14 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/cli/index.tsx --outdir dist/cli --target bun --external ink --external react --external chalk --external @modelcontextprotocol/sdk && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun && bun build src/index.ts --outdir dist --target bun && (tsc --emitDeclarationOnly --outDir dist || true) && sed -i.bak 's|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/cli/index.js dist/mcp/index.js dist/server/index.js && rm -f dist/cli/index.js.bak dist/mcp/index.js.bak dist/server/index.js.bak",
+    "clean": "rm -rf dist",
+    "build": "bun run clean && bun build src/cli/index.tsx --outdir dist/cli --target bun --external ink --external react --external chalk --external @modelcontextprotocol/sdk && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun && bun build src/index.ts src/storage.ts --outdir dist --target bun && tsc --emitDeclarationOnly --outDir dist && sed -i.bak 's|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/cli/index.js dist/mcp/index.js dist/server/index.js && rm -f dist/cli/index.js.bak dist/mcp/index.js.bak dist/server/index.js.bak",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",
-    "prepublishOnly": "bun run build",
-    "postinstall": "mkdir -p $HOME/.hasna/context 2>/dev/null || true"
+    "prepublishOnly": "bun run build"
   },
   "keywords": [
     "context",
@@ -64,17 +68,31 @@
   "dependencies": {
     "@hasna/cloud": "0.1.24",
     "@hasna/events": "^0.1.6",
+    "@ai-sdk/anthropic": "^3.0.81",
+    "@ai-sdk/cohere": "^3.0.36",
+    "@ai-sdk/deepseek": "^2.0.35",
+    "@ai-sdk/google": "^3.0.80",
+    "@ai-sdk/groq": "^3.0.39",
+    "@ai-sdk/mistral": "^3.0.37",
+    "@ai-sdk/openai": "^3.0.68",
+    "@ai-sdk/perplexity": "^3.0.33",
+    "@ai-sdk/togetherai": "^2.0.53",
+    "@ai-sdk/xai": "^3.0.93",
     "@mendable/firecrawl-js": "^4.16.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "ai": "^6.0.198",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "exa-js": "^1.7.9",
     "ink": "^5.2.0",
+    "pg": "^8.13.3",
     "react": "^18.3.1",
+    "yaml": "^2.9.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/bun": "^1.2.4",
+    "@types/pg": "^8.11.11",
     "@types/react": "^18.3.18",
     "typescript": "^5.7.3"
   }

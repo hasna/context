@@ -192,11 +192,23 @@ export function deduplicateChunks(
   threshold = 0.8
 ): string[] {
   const result: string[] = [];
+  const exact = new Set<string>();
+  const similarityWindow = chunks.length > 500 ? 64 : Number.POSITIVE_INFINITY;
+
   for (const chunk of chunks) {
-    const isDuplicate = result.some(
+    const key = normalizeChunkKey(chunk);
+    if (exact.has(key)) continue;
+
+    const candidates = Number.isFinite(similarityWindow)
+      ? result.slice(Math.max(0, result.length - similarityWindow))
+      : result;
+    const isDuplicate = candidates.some(
       (existing) => jaccardSimilarity(existing, chunk) > threshold
     );
-    if (!isDuplicate) result.push(chunk);
+    if (!isDuplicate) {
+      result.push(chunk);
+      exact.add(key);
+    }
   }
   return result;
 }
@@ -220,4 +232,8 @@ function splitBySentences(text: string): string[] {
     .split(/(?<=[.!?])\s+(?=[A-Z])/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function normalizeChunkKey(chunk: string): string {
+  return chunk.toLowerCase().replace(/\s+/g, " ").trim();
 }

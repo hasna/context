@@ -1,28 +1,151 @@
-import { SqliteAdapter as Database } from "@hasna/cloud";
+import { Database as BunDatabase } from "bun:sqlite";
+import type { Changes, SQLQueryBindings, Statement } from "bun:sqlite";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "fs";
 import { dirname, join } from "path";
 import { homedir } from "os";
 
-let _db: Database | null = null;
+export interface ContextStatement<ReturnType = any, ParamsType extends unknown[] = unknown[]> {
+  all(...params: ParamsType): ReturnType[];
+  get(...params: ParamsType): ReturnType | null;
+  run(...params: ParamsType): Changes;
+}
 
-export function getDataDir(): string {
-  const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
-  const newDir = join(home, ".hasna", "context");
-  const oldDir = join(home, ".context");
+class LocalContextStatement<ReturnType = any, ParamsType extends unknown[] = unknown[]> implements ContextStatement<ReturnType, ParamsType> {
+  constructor(private readonly statement: Statement<ReturnType, any[]>) {}
 
-  // Auto-migrate old dir to new location
-  if (existsSync(oldDir) && !existsSync(newDir)) {
-    mkdirSync(newDir, { recursive: true });
-    for (const file of readdirSync(oldDir)) {
-      const oldPath = join(oldDir, file);
-      if (statSync(oldPath).isFile()) {
-        copyFileSync(oldPath, join(newDir, file));
-      }
-    }
+  all(...params: ParamsType): ReturnType[] {
+    return this.statement.all(...normalizeBindings(params));
   }
 
+  get(...params: ParamsType): ReturnType | null {
+    return this.statement.get(...normalizeBindings(params));
+  }
+
+  run(...params: ParamsType): Changes {
+    return this.statement.run(...normalizeBindings(params));
+  }
+}
+
+export class ContextDatabase {
+  private readonly database: BunDatabase;
+
+  constructor(path: string) {
+    this.database = new BunDatabase(path);
+  }
+
+  exec(sql: string): Changes {
+    return this.database.exec(sql);
+  }
+
+  all<ReturnType = any>(sql: string, ...params: unknown[]): ReturnType[] {
+    return this.database.query(sql).all(...normalizeBindings(params)) as ReturnType[];
+  }
+
+  get<ReturnType = any>(sql: string, ...params: unknown[]): ReturnType | null {
+    return this.database.query(sql).get(...normalizeBindings(params)) as ReturnType | null;
+  }
+
+  query<ReturnType = any, ParamsType extends unknown[] = unknown[]>(sql: string): ContextStatement<ReturnType, ParamsType> {
+    return new LocalContextStatement(this.database.query(sql));
+  }
+
+  prepare<ReturnType = any, ParamsType extends unknown[] = unknown[]>(sql: string): ContextStatement<ReturnType, ParamsType> {
+    return new LocalContextStatement(this.database.prepare(sql));
+  }
+
+  run(sql: string, ...params: unknown[]): Changes {
+    const bindings = normalizeBindings(params);
+    return bindings.length === 0 ? this.database.run(sql) : this.database.run(sql, bindings);
+  }
+
+  close(): void {
+    this.database.close();
+  }
+}
+
+export type Database = ContextDatabase;
+
+let _db: Database | null = null;
+const DEFAULT_DB_FILENAME = "context.db";
+const LEGACY_DB_FILENAME = "context.db";
+
+function normalizeBindings(params: unknown[]): SQLQueryBindings[] {
+  const flat = params.length === 1 && Array.isArray(params[0]) ? params[0] : params;
+  return flat.map(coerceBinding);
+}
+
+function coerceBinding(value: unknown): SQLQueryBindings {
+  if (value === undefined) return null;
+  return value as SQLQueryBindings;
+}
+
+export function getDataDir(): string {
+  const override = process.env["HASNA_CONTEXT_DATA_DIR"] ?? process.env["CONTEXT_DATA_DIR"];
+  if (override) {
+    mkdirSync(override, { recursive: true });
+    return override;
+  }
+
+  const newDir = getDefaultDataDir();
+  migrateLegacyDataDir(newDir);
   mkdirSync(newDir, { recursive: true });
   return newDir;
+}
+
+function getDefaultDataDir(): string {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
+  return join(home, ".hasna", "apps", "knowledge");
+}
+
+function getLegacyDataDirs(): string[] {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
+  return [
+    join(home, ".hasna", "context"),
+    join(home, ".context"),
+  ];
+}
+
+function migrateLegacyDataDir(newDir: string): void {
+  for (const oldDir of getLegacyDataDirs()) {
+    if (!existsSync(oldDir)) continue;
+    if (!existsSync(newDir)) {
+      copyDirectory(oldDir, newDir);
+    }
+    migrateLegacyDbFilename(newDir);
+    return;
+  }
+
+  migrateLegacyDbFilename(newDir);
+}
+
+function copyDirectory(source: string, target: string): void {
+  mkdirSync(target, { recursive: true });
+  for (const file of readdirSync(source)) {
+    const sourcePath = join(source, file);
+    const targetPath = join(target, file);
+    const stats = statSync(sourcePath);
+    if (stats.isDirectory()) {
+      copyDirectory(sourcePath, targetPath);
+    } else if (stats.isFile()) {
+      copyFileSync(sourcePath, targetPath);
+    }
+  }
+}
+
+function migrateLegacyDbFilename(dataDir: string): void {
+  if (!existsSync(dataDir)) return;
+  const source = join(dataDir, LEGACY_DB_FILENAME);
+  const target = join(dataDir, DEFAULT_DB_FILENAME);
+  if (existsSync(source) && !existsSync(target)) {
+    copyFileSync(source, target);
+  }
+  for (const suffix of ["-shm", "-wal"]) {
+    const sourceSidecar = `${source}${suffix}`;
+    const targetSidecar = `${target}${suffix}`;
+    if (existsSync(sourceSidecar) && !existsSync(targetSidecar)) {
+      copyFileSync(sourceSidecar, targetSidecar);
+    }
+  }
 }
 
 function resolveDbPath(): string {
@@ -33,18 +156,25 @@ function resolveDbPath(): string {
     return process.env["CONTEXT_DB_PATH"];
   }
 
-  // Walk up from cwd looking for .context/context.db
+  // Walk up from cwd looking for local app data first, then legacy stores.
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
   let dir = process.cwd();
   for (let i = 0; i < 10; i++) {
-    const candidate = join(dir, ".context", "context.db");
-    if (existsSync(candidate)) return candidate;
+    const candidates = [
+      join(dir, ".hasna", "apps", "knowledge", DEFAULT_DB_FILENAME),
+      ...(dir === home ? [] : [join(dir, ".context", LEGACY_DB_FILENAME)]),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
 
-  // Default: ~/.hasna/context/context.db
-  return join(getDataDir(), "context.db");
+  // Default: ~/.hasna/apps/knowledge/context.db
+  const override = process.env["HASNA_CONTEXT_DATA_DIR"] ?? process.env["CONTEXT_DATA_DIR"];
+  return join(override ?? getDefaultDataDir(), DEFAULT_DB_FILENAME);
 }
 
 export function getDatabase(): Database {
@@ -53,10 +183,13 @@ export function getDatabase(): Database {
   const path = resolveDbPath();
 
   if (path !== ":memory:") {
+    if (path === join(getDefaultDataDir(), DEFAULT_DB_FILENAME)) {
+      getDataDir();
+    }
     mkdirSync(dirname(path), { recursive: true });
   }
 
-  const db = new Database(path);
+  const db = new ContextDatabase(path);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec("PRAGMA foreign_keys = ON");
@@ -463,6 +596,182 @@ const migrations = [
 
       CREATE INDEX IF NOT EXISTS idx_context_watches_context ON context_watches(context_id);
       CREATE INDEX IF NOT EXISTS idx_context_watches_active ON context_watches(active);
+    `,
+  },
+  {
+    version: 9,
+    name: "docs_artifacts_and_update_tasks",
+    sql: `
+      ALTER TABLE libraries ADD COLUMN source_type TEXT DEFAULT 'docs' NOT NULL;
+      ALTER TABLE libraries ADD COLUMN source_url TEXT;
+      ALTER TABLE libraries ADD COLUMN freshness_days INTEGER DEFAULT 7 NOT NULL;
+      ALTER TABLE libraries ADD COLUMN priority INTEGER DEFAULT 0 NOT NULL;
+      ALTER TABLE libraries ADD COLUMN last_checked_at TEXT;
+      ALTER TABLE libraries ADD COLUMN next_check_at TEXT;
+
+      ALTER TABLE documents ADD COLUMN content_hash TEXT;
+      ALTER TABLE documents ADD COLUMN file_path TEXT;
+      ALTER TABLE documents ADD COLUMN source_type TEXT DEFAULT 'docs' NOT NULL;
+      ALTER TABLE documents ADD COLUMN status TEXT DEFAULT 'active' NOT NULL;
+      ALTER TABLE documents ADD COLUMN discovered_at TEXT;
+      ALTER TABLE documents ADD COLUMN updated_at TEXT;
+      ALTER TABLE documents ADD COLUMN metadata TEXT DEFAULT '{}' NOT NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash);
+      CREATE INDEX IF NOT EXISTS idx_documents_file_path ON documents(file_path);
+      CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
+      CREATE INDEX IF NOT EXISTS idx_libraries_next_check ON libraries(next_check_at);
+      CREATE INDEX IF NOT EXISTS idx_libraries_source ON libraries(source_type);
+
+      CREATE TABLE IF NOT EXISTS doc_update_tasks (
+        id TEXT PRIMARY KEY,
+        library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+        task_type TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT DEFAULT 'pending' NOT NULL,
+        priority INTEGER DEFAULT 0 NOT NULL,
+        scheduled_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_doc_tasks_library ON doc_update_tasks(library_id);
+      CREATE INDEX IF NOT EXISTS idx_doc_tasks_status ON doc_update_tasks(status);
+      CREATE INDEX IF NOT EXISTS idx_doc_tasks_scheduled ON doc_update_tasks(scheduled_at);
+
+      CREATE TABLE IF NOT EXISTS webhook_endpoints (
+        id TEXT PRIMARY KEY,
+        url TEXT NOT NULL UNIQUE,
+        events TEXT DEFAULT '[]' NOT NULL,
+        active INTEGER DEFAULT 1 NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_active ON webhook_endpoints(active);
+
+      CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        id TEXT PRIMARY KEY,
+        endpoint_id TEXT NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE,
+        event TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT DEFAULT 'pending' NOT NULL,
+        response_status INTEGER,
+        error TEXT,
+        delivered_at TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event ON webhook_deliveries(event);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status);
+    `,
+  },
+  {
+    version: 10,
+    name: "webhook_endpoints",
+    sql: `
+      CREATE TABLE IF NOT EXISTS webhook_endpoints (
+        id TEXT PRIMARY KEY,
+        url TEXT NOT NULL UNIQUE,
+        events TEXT DEFAULT '[]' NOT NULL,
+        active INTEGER DEFAULT 1 NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_active ON webhook_endpoints(active);
+
+      CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        id TEXT PRIMARY KEY,
+        endpoint_id TEXT NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE,
+        event TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT DEFAULT 'pending' NOT NULL,
+        response_status INTEGER,
+        error TEXT,
+        delivered_at TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event ON webhook_deliveries(event);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status);
+    `,
+  },
+  {
+    version: 11,
+    name: "api_endpoints",
+    sql: `
+      CREATE TABLE IF NOT EXISTS api_endpoints (
+        id TEXT PRIMARY KEY,
+        library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        url TEXT NOT NULL,
+        endpoint_key TEXT NOT NULL,
+        method TEXT NOT NULL,
+        path TEXT NOT NULL,
+        operation_id TEXT,
+        summary TEXT,
+        description TEXT,
+        tags TEXT DEFAULT '[]' NOT NULL,
+        parameters TEXT DEFAULT '[]' NOT NULL,
+        request_body TEXT,
+        responses TEXT DEFAULT '{}' NOT NULL,
+        source_format TEXT DEFAULT 'raw' NOT NULL,
+        spec_version TEXT,
+        api_version TEXT,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(library_id, endpoint_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_api_endpoints_library ON api_endpoints(library_id);
+      CREATE INDEX IF NOT EXISTS idx_api_endpoints_document ON api_endpoints(document_id);
+      CREATE INDEX IF NOT EXISTS idx_api_endpoints_method_path ON api_endpoints(method, path);
+      CREATE INDEX IF NOT EXISTS idx_api_endpoints_operation ON api_endpoints(operation_id);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS api_endpoints_fts USING fts5(
+        method,
+        path,
+        operation_id,
+        summary,
+        description,
+        tags,
+        content,
+        tokenize='porter ascii'
+      );
+
+      CREATE TABLE IF NOT EXISTS api_endpoints_fts_map (
+        rowid INTEGER PRIMARY KEY,
+        endpoint_id TEXT NOT NULL UNIQUE
+      );
+
+      CREATE TRIGGER IF NOT EXISTS api_endpoints_ai AFTER INSERT ON api_endpoints BEGIN
+        INSERT INTO api_endpoints_fts(method, path, operation_id, summary, description, tags, content)
+        VALUES (
+          new.method,
+          new.path,
+          COALESCE(new.operation_id, ''),
+          COALESCE(new.summary, ''),
+          COALESCE(new.description, ''),
+          COALESCE(new.tags, ''),
+          new.content
+        );
+        INSERT INTO api_endpoints_fts_map(rowid, endpoint_id)
+        VALUES (last_insert_rowid(), new.id);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS api_endpoints_ad AFTER DELETE ON api_endpoints BEGIN
+        DELETE FROM api_endpoints_fts WHERE rowid = (
+          SELECT rowid FROM api_endpoints_fts_map WHERE endpoint_id = old.id
+        );
+        DELETE FROM api_endpoints_fts_map WHERE endpoint_id = old.id;
+      END;
     `,
   },
 ];

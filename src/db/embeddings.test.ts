@@ -9,6 +9,7 @@ import {
   cosineSimilarity,
   semanticSearch,
   embeddingCoverage,
+  getEmbeddingConfig,
 } from "./embeddings.js";
 
 let libraryId: string;
@@ -31,6 +32,11 @@ beforeEach(() => {
 
 afterEach(() => {
   resetDatabase();
+  delete process.env["CONTEXT_EMBEDDING_PROVIDER"];
+  delete process.env["CONTEXT_EMBEDDING_MODEL"];
+  delete process.env["OPENAI_API_KEY"];
+  delete process.env["VOYAGE_API_KEY"];
+  delete process.env["ANTHROPIC_API_KEY"];
 });
 
 describe("cosineSimilarity", () => {
@@ -122,6 +128,37 @@ describe("semanticSearch", () => {
     expect(results[0]!.chunk_id).toBe(chunk1.id);
     expect(results[0]!.score).toBeGreaterThan(results[1]!.score);
   });
+
+  it("filters incompatible dimensions and zero-score matches", () => {
+    const lib = createLibrary({ name: "SemanticDimensions" });
+    const doc = upsertDocument({ library_id: lib.id, url: "https://semantic-dimensions.com" });
+    const compatible = insertChunk({
+      library_id: lib.id,
+      document_id: doc.id,
+      content: "compatible embedding dimensions",
+      position: 0,
+    });
+    const incompatible = insertChunk({
+      library_id: lib.id,
+      document_id: doc.id,
+      content: "incompatible embedding dimensions",
+      position: 1,
+    });
+    const orthogonal = insertChunk({
+      library_id: lib.id,
+      document_id: doc.id,
+      content: "orthogonal embedding",
+      position: 2,
+    });
+
+    saveEmbedding(compatible.id, "test", new Float32Array([1, 0]));
+    saveEmbedding(incompatible.id, "test", new Float32Array([1, 0, 0]));
+    saveEmbedding(orthogonal.id, "test", new Float32Array([0, 1]));
+
+    const results = semanticSearch(new Float32Array([1, 0]), lib.id, 10);
+
+    expect(results.map((result) => result.chunk_id)).toEqual([compatible.id]);
+  });
 });
 
 describe("embeddingCoverage", () => {
@@ -133,5 +170,25 @@ describe("embeddingCoverage", () => {
     saveEmbedding(chunkId, "model", new Float32Array([1, 0]));
     const after = embeddingCoverage(libraryId);
     expect(after.embedded).toBe(1);
+  });
+});
+
+describe("getEmbeddingConfig", () => {
+  it("configures Voyage embeddings with VOYAGE_API_KEY", () => {
+    process.env["CONTEXT_EMBEDDING_PROVIDER"] = "voyage";
+    process.env["VOYAGE_API_KEY"] = "voyage-test-key";
+
+    expect(getEmbeddingConfig()).toMatchObject({
+      provider: "voyage",
+      model: "voyage-3-lite",
+      apiKey: "voyage-test-key",
+    });
+  });
+
+  it("does not use ANTHROPIC_API_KEY for Voyage embeddings", () => {
+    process.env["CONTEXT_EMBEDDING_PROVIDER"] = "anthropic";
+    process.env["ANTHROPIC_API_KEY"] = "anthropic-test-key";
+
+    expect(() => getEmbeddingConfig()).toThrow("VOYAGE_API_KEY required for Voyage embeddings");
   });
 });

@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { SqliteAdapter } from "@hasna/cloud";
+import type { Database } from "./database.js";
 import { getDatabase } from "./database.js";
 
 export type NodeType =
@@ -8,6 +8,7 @@ export type NodeType =
   | "language"
   | "concept"
   | "api"
+  | "endpoint"
   | "package"
   | "tool";
 
@@ -81,7 +82,7 @@ export function upsertNode(
     library_id?: string;
     metadata?: Record<string, unknown>;
   },
-  db?: SqliteAdapter
+  db?: Database
 ): KgNode {
   const database = db ?? getDatabase();
   const now = new Date().toISOString();
@@ -141,7 +142,7 @@ export function upsertEdge(
     weight?: number;
     metadata?: Record<string, unknown>;
   },
-  db?: SqliteAdapter
+  db?: Database
 ): KgEdge {
   const database = db ?? getDatabase();
   const now = new Date().toISOString();
@@ -195,20 +196,29 @@ export function upsertEdge(
 
 export function getNodeByLibraryId(
   libraryId: string,
-  db?: SqliteAdapter
+  db?: Database
 ): KgNode | null {
   const database = db ?? getDatabase();
   const row = database.get(
-    "SELECT * FROM kg_nodes WHERE library_id = ? LIMIT 1",
+    "SELECT * FROM kg_nodes WHERE library_id = ? AND type = 'library' LIMIT 1",
     libraryId
   ) as Record<string, unknown> | null;
   return row ? rowToNode(row) : null;
 }
 
+export function deleteNodesForLibraryByType(
+  libraryId: string,
+  type: NodeType,
+  db?: Database
+): void {
+  const database = db ?? getDatabase();
+  database.run("DELETE FROM kg_nodes WHERE library_id = ? AND type = ?", [libraryId, type]);
+}
+
 export function getRelatedNodes(
   nodeId: string,
   relation?: EdgeRelation,
-  db?: SqliteAdapter
+  db?: Database
 ): KgNodeWithRelations {
   const database = db ?? getDatabase();
 
@@ -290,7 +300,7 @@ export function getRelatedNodes(
   return { ...rowToNode(node), relations };
 }
 
-export function searchNodes(query: string, db?: SqliteAdapter): KgNode[] {
+export function searchNodes(query: string, db?: Database): KgNode[] {
   const database = db ?? getDatabase();
   return (database.all(
     "SELECT * FROM kg_nodes WHERE name LIKE ? OR description LIKE ? ORDER BY name LIMIT 20",
@@ -299,7 +309,7 @@ export function searchNodes(query: string, db?: SqliteAdapter): KgNode[] {
   ) as Record<string, unknown>[]).map(rowToNode);
 }
 
-export function listNodes(db?: SqliteAdapter): KgNode[] {
+export function listNodes(db?: Database): KgNode[] {
   const database = db ?? getDatabase();
   return (database.all(
     "SELECT * FROM kg_nodes ORDER BY type ASC, name ASC"

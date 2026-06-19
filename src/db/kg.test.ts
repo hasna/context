@@ -133,4 +133,14 @@ describe("getNodeByLibraryId", () => {
     expect(node).not.toBeNull();
     expect(node!.name).toBe("Linked");
   });
+
+  it("ignores non-library nodes linked to the same library", () => {
+    const lib = createLibrary({ name: "Endpoint Linked" });
+    upsertNode({ type: "endpoint", name: "endpoint-linked POST /widgets", library_id: lib.id });
+    upsertNode({ type: "library", name: "Endpoint Linked", library_id: lib.id });
+
+    const node = getNodeByLibraryId(lib.id);
+    expect(node?.type).toBe("library");
+    expect(node?.name).toBe("Endpoint Linked");
+  });
 });

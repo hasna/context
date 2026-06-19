@@ -1,8 +1,8 @@
-import { SqliteAdapter } from "@hasna/cloud";
+import type { Database } from "./database.js";
 import { getDatabase } from "./database.js";
 import type { SearchResult } from "../types/index.js";
 
-export type EmbeddingProvider = "openai" | "anthropic" | "none";
+export type EmbeddingProvider = "openai" | "voyage" | "none";
 
 export interface EmbeddingConfig {
   provider: EmbeddingProvider;
@@ -11,11 +11,11 @@ export interface EmbeddingConfig {
 }
 
 export function getEmbeddingConfig(): EmbeddingConfig | null {
-  const provider = (process.env["CONTEXT_EMBEDDING_PROVIDER"] ?? "none") as EmbeddingProvider;
+  const provider = (process.env["CONTEXT_EMBEDDING_PROVIDER"] ?? "none").trim().toLowerCase();
   if (provider === "none") return null;
 
   if (provider === "openai") {
-    const key = process.env["OPENAI_API_KEY"] ?? process.env["HASNAXYZ_OPENAI_LIVE_API_KEY"];
+    const key = process.env["OPENAI_API_KEY"];
     if (!key) throw new Error("OPENAI_API_KEY required for OpenAI embeddings");
     return {
       provider: "openai",
@@ -24,15 +24,17 @@ export function getEmbeddingConfig(): EmbeddingConfig | null {
     };
   }
 
-  if (provider === "anthropic") {
-    // Anthropic uses voyage embeddings via their API
-    const key =
-      process.env["VOYAGE_API_KEY"] ??
-      process.env["ANTHROPIC_API_KEY"] ??
-      process.env["HASNAXYZ_ANTHROPIC_LIVE_API_KEY"];
-    if (!key) throw new Error("VOYAGE_API_KEY or ANTHROPIC_API_KEY required for Anthropic embeddings");
+  if (provider === "voyage" || provider === "anthropic") {
+    const key = process.env["VOYAGE_API_KEY"];
+    if (!key) {
+      throw new Error(
+        provider === "anthropic"
+          ? "VOYAGE_API_KEY required for Voyage embeddings. CONTEXT_EMBEDDING_PROVIDER=anthropic is a deprecated alias; use CONTEXT_EMBEDDING_PROVIDER=voyage."
+          : "VOYAGE_API_KEY required for Voyage embeddings"
+      );
+    }
     return {
-      provider: "anthropic",
+      provider: "voyage",
       model: process.env["CONTEXT_EMBEDDING_MODEL"] ?? "voyage-3-lite",
       apiKey: key,
     };
@@ -51,7 +53,7 @@ export async function embedText(
   if (config.provider === "openai") {
     return embedOpenAI(text, config);
   }
-  if (config.provider === "anthropic") {
+  if (config.provider === "voyage") {
     return embedVoyage(text, config);
   }
   throw new Error(`Unknown embedding provider: ${config.provider}`);
@@ -119,7 +121,7 @@ export function saveEmbedding(
   chunkId: string,
   model: string,
   embedding: Float32Array,
-  db?: SqliteAdapter
+  db?: Database
 ): void {
   const database = db ?? getDatabase();
   const blob = Buffer.from(embedding.buffer);
@@ -137,7 +139,7 @@ export function saveEmbedding(
  */
 export function getEmbedding(
   chunkId: string,
-  db?: SqliteAdapter
+  db?: Database
 ): Float32Array | null {
   const database = db ?? getDatabase();
   const row = database.get(
@@ -172,7 +174,7 @@ export function semanticSearch(
   queryEmbedding: Float32Array,
   libraryId: string | undefined,
   limit: number,
-  db?: SqliteAdapter
+  db?: Database
 ): SearchResult[] {
   const database = db ?? getDatabase();
 
@@ -214,14 +216,16 @@ export function semanticSearch(
     dimensions: number;
   }>;
 
-  const scored = rows.map((row) => {
+  const scored = rows.flatMap((row) => {
+    if (row.dimensions !== queryEmbedding.length) return [];
     const vec = new Float32Array(
       row.embedding.buffer,
       row.embedding.byteOffset,
       row.dimensions
     );
     const score = cosineSimilarity(queryEmbedding, vec);
-    return {
+    if (score <= 0) return [];
+    return [{
       chunk_id: row.chunk_id,
       library_id: row.library_id,
       document_id: row.document_id,
@@ -229,7 +233,7 @@ export function semanticSearch(
       url: row.url,
       title: row.title,
       score,
-    };
+    }];
   });
 
   return scored.sort((a, b) => b.score - a.score).slice(0, limit);
@@ -240,7 +244,7 @@ export function semanticSearch(
  */
 export function embeddingCoverage(
   libraryId: string,
-  db?: SqliteAdapter
+  db?: Database
 ): { total: number; embedded: number } {
   const database = db ?? getDatabase();
   const total =

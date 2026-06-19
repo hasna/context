@@ -19,8 +19,15 @@ import {
   searchCodeEntities,
   getRelevantContext,
 } from "../db/repositories.js";
+import { registerContextStorageTools } from "./storage-tools.js";
 import { registerLibraryTools } from "./library-tools.js";
 import { isStdioMode, resolveMcpHttpPort, startMcpHttpServer } from "./http.js";
+import {
+  generateWithAiSdk,
+  getAiProviderStatuses,
+  type AiProviderId,
+} from "../ai/providers.js";
+import { getPublishReadinessReport } from "../publish/readiness.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
@@ -57,6 +64,76 @@ if (handleMetaArgs()) {
 
 export function buildServer(): McpServer {
 const server = new McpServer({ name: "context", version: pkg.version });
+registerContextStorageTools(server);
+
+server.tool(
+  "ai_status",
+  "Show configured AI SDK generation backends and required API key environment variables.",
+  {},
+  async () => {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(getAiProviderStatuses(), null, 2),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "ai_generate",
+  "Generate text using the configured AI SDK backend.",
+  {
+    prompt: z.string(),
+    backend: z.string().optional(),
+    model: z.string().optional(),
+    system: z.string().optional(),
+  },
+  async (params) => {
+    try {
+      const result = await generateWithAiSdk({
+        prompt: params.prompt,
+        provider: params.backend as AiProviderId | undefined,
+        model: params.model,
+        system: params.system,
+      });
+      return { content: [{ type: "text", text: result.text }] };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "publish_readiness",
+  "Audit package readiness before publishing to npm.",
+  {
+    includeRegistry: z.boolean().optional().default(false),
+    latestRegistryVersion: z.string().optional(),
+  },
+  async ({ includeRegistry = false, latestRegistryVersion }) => {
+    try {
+      const report = await getPublishReadinessReport({
+        includeRegistry,
+        registryLatestVersion: latestRegistryVersion,
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+        isError: !report.ready,
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+        isError: true,
+      };
+    }
+  }
+);
 
 // --- in-memory agent registry ---
 interface _CtxAgent { id: string; name: string; session_id?: string; last_seen_at: string; project_id?: string; }
