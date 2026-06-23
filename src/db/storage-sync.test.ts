@@ -44,6 +44,8 @@ describe("context storage configuration", () => {
 
   it("returns all tables by default and rejects unknown tables", () => {
     expect(resolveTables()).toEqual([...STORAGE_TABLES]);
+    expect(STORAGE_TABLES).toContain("api_endpoints");
+    expect(resolveTables(["api_endpoints"])).toEqual(["api_endpoints"]);
     expect(() => resolveTables(["libraries", "missing"])).toThrow("Unknown context sync table");
   });
 });

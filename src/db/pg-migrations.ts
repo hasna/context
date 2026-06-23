@@ -319,4 +319,34 @@ export const PG_MIGRATIONS: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id)`,
   `CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event ON webhook_deliveries(event)`,
   `CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status)`,
+
+  // Migration 14: API endpoint rows (SQLite schema version 11)
+  `CREATE TABLE IF NOT EXISTS api_endpoints (
+    id TEXT PRIMARY KEY,
+    library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    endpoint_key TEXT NOT NULL,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    operation_id TEXT,
+    summary TEXT,
+    description TEXT,
+    tags TEXT DEFAULT '[]' NOT NULL,
+    parameters TEXT DEFAULT '[]' NOT NULL,
+    request_body TEXT,
+    responses TEXT DEFAULT '{}' NOT NULL,
+    source_format TEXT DEFAULT 'raw' NOT NULL,
+    spec_version TEXT,
+    api_version TEXT,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(library_id, endpoint_key)
+  )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_api_endpoints_library ON api_endpoints(library_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_api_endpoints_document ON api_endpoints(document_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_api_endpoints_method_path ON api_endpoints(method, path)`,
+  `CREATE INDEX IF NOT EXISTS idx_api_endpoints_operation ON api_endpoints(operation_id)`,
 ];
