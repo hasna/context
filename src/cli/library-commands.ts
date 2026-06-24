@@ -32,7 +32,7 @@ import { type SeedLibraryGroup } from "../seeds/libraries.js";
 import { bootstrapSeedSources } from "../seeds/bootstrap.js";
 import { embedLibraryChunks } from "../semantic/index.js";
 import { getSourceReadinessReport } from "../sources/readiness.js";
-import { formatDate } from "./format.js";
+import { DEFAULT_LIST_LIMIT, formatDate, parseLimit, takeWithMore, truncateText } from "./format.js";
 
 export function registerLibraryCommands(program: Command): void {
   // ─── context add ──────────────────────────────────────────────────────────────
@@ -293,8 +293,10 @@ export function registerLibraryCommands(program: Command): void {
   program
     .command("list")
     .description("List all indexed libraries")
+    .option("-n, --limit <n>", "Max libraries to show", String(DEFAULT_LIST_LIMIT))
+    .option("--verbose", "Show descriptions for visible libraries")
     .option("--json", "Output as JSON")
-    .action((opts: { json?: boolean }) => {
+    .action((opts: { limit?: string; verbose?: boolean; json?: boolean }) => {
       const libraries = listLibraries();
 
       if (opts.json) {
@@ -309,7 +311,9 @@ export function registerLibraryCommands(program: Command): void {
       }
 
       console.log(chalk.bold(`\n${libraries.length} librar${libraries.length === 1 ? "y" : "ies"}:\n`));
-      for (const lib of libraries) {
+      const limit = parseLimit(opts.limit);
+      const { visible, remaining } = takeWithMore(libraries, limit);
+      for (const lib of visible) {
         const id = chalk.cyan(`/context/${lib.slug}`);
         const name = chalk.bold(lib.name);
         const version = lib.version ? chalk.gray(` v${lib.version}`) : "";
@@ -317,8 +321,10 @@ export function registerLibraryCommands(program: Command): void {
           ? chalk.gray(` (${lib.chunk_count} chunks)`)
           : chalk.yellow(" (not indexed)");
         console.log(`  ${id}  ${name}${version}${crawled} ${chalk.gray(`[${lib.source_type}]`)}`);
-        if (lib.description) console.log(`    ${chalk.gray(lib.description)}`);
+        if (opts.verbose && lib.description) console.log(`    ${chalk.gray(truncateText(lib.description, 180))}`);
       }
+      if (remaining > 0) console.log(chalk.gray(`\n  ...${remaining} more librar${remaining === 1 ? "y" : "ies"}. Use --limit ${libraries.length} to show all.`));
+      if (!opts.verbose) console.log(chalk.gray("  Use --verbose for descriptions or --json for raw library records."));
       console.log();
     });
 
@@ -330,11 +336,12 @@ export function registerLibraryCommands(program: Command): void {
     .option("-l, --library <slug>", "Limit to a specific library")
     .option("-n, --limit <n>", "Max results", "5")
     .option("--semantic", "Use semantic search (requires CONTEXT_EMBEDDING_PROVIDER)")
+    .option("--verbose", "Show full matched chunk text")
     .option("--json", "Output as JSON")
     .action(
       async (
         query: string,
-        opts: { library?: string; limit?: string; semantic?: boolean; json?: boolean }
+        opts: { library?: string; limit?: string; semantic?: boolean; verbose?: boolean; json?: boolean }
       ) => {
         let libraryId: string | undefined;
         let libraryName: string | undefined;
@@ -375,8 +382,11 @@ export function registerLibraryCommands(program: Command): void {
               console.log(chalk.cyan(r.title ?? r.url ?? ""));
             }
             console.log(chalk.gray(`score: ${r.score.toFixed(3)}`));
-            console.log(r.content.slice(0, 300) + (r.content.length > 300 ? "…" : ""));
+            console.log(opts.verbose ? r.content : truncateText(r.content));
             console.log();
+          }
+          if (!opts.verbose) {
+            console.log(chalk.gray("Use --verbose for full chunk text, --json for raw records, or --limit to change result count."));
           }
           return;
         }
@@ -399,8 +409,11 @@ export function registerLibraryCommands(program: Command): void {
         for (const r of results) {
           if (r.title || r.url) console.log(chalk.cyan(r.title ?? r.url ?? ""));
           if (r.url && r.title) console.log(chalk.gray(r.url));
-          console.log(r.content.slice(0, 300) + (r.content.length > 300 ? "…" : ""));
+          console.log(opts.verbose ? r.content : truncateText(r.content));
           console.log();
+        }
+        if (!opts.verbose) {
+          console.log(chalk.gray("Use --verbose for full chunk text, --json for raw records, or --limit to change result count."));
         }
       }
     );
@@ -413,6 +426,7 @@ export function registerLibraryCommands(program: Command): void {
     .option("--path <path>", "Filter by exact API path")
     .option("--operation <id>", "Filter by exact operationId")
     .option("-n, --limit <n>", "Max endpoints", "20")
+    .option("--verbose", "Show full indexed endpoint text")
     .option("--json", "Output as JSON")
     .action((librarySlug: string, opts: {
       query?: string;
@@ -420,6 +434,7 @@ export function registerLibraryCommands(program: Command): void {
       path?: string;
       operation?: string;
       limit?: string;
+      verbose?: boolean;
       json?: boolean;
     }) => {
       const library = getLibraryBySlug(librarySlug);
@@ -449,7 +464,11 @@ export function registerLibraryCommands(program: Command): void {
         if (endpoint.summary) console.log(`  ${endpoint.summary}`);
         if (endpoint.tags.length) console.log(chalk.gray(`  tags: ${endpoint.tags.join(", ")}`));
         if (endpoint.url) console.log(chalk.gray(`  source: ${endpoint.url}`));
+        if (opts.verbose) console.log(chalk.gray(`  details:\n${endpoint.content}`));
         console.log();
+      }
+      if (!opts.verbose) {
+        console.log(chalk.gray("Use --verbose for endpoint details or --json for raw schema/request/response metadata."));
       }
     });
 
@@ -671,8 +690,10 @@ export function registerLibraryCommands(program: Command): void {
   program
     .command("history <slug>")
     .description("Show version history of refreshed documents for a library")
+    .option("-n, --limit <n>", "Max documents to show", String(DEFAULT_LIST_LIMIT))
+    .option("--verbose", "Show every stored document version")
     .option("--json", "Output as JSON")
-    .action((slug: string, opts: { json?: boolean }) => {
+    .action((slug: string, opts: { limit?: string; verbose?: boolean; json?: boolean }) => {
       const lib = getLibraryBySlug(slug);
       const docs = listDocuments(lib.id);
 
@@ -690,17 +711,29 @@ export function registerLibraryCommands(program: Command): void {
         return;
       }
 
+      const limit = parseLimit(opts.limit);
+      const { visible, remaining } = takeWithMore(docs, limit);
       console.log(chalk.bold(`\n${lib.name} — Document History:\n`));
-      for (const doc of docs) {
+      for (const doc of visible) {
         const versions = getDocumentVersions(doc.id);
         if (versions.length === 0) continue;
         console.log(`  ${chalk.cyan(doc.url ?? doc.id)}`);
-        for (const v of versions) {
-          console.log(
-            `    v${v.version_number}  ${chalk.gray(formatDate(v.crawled_at))}  ${chalk.gray(`hash:${v.content_hash}`)}`
-          );
+        if (opts.verbose) {
+          for (const v of versions) {
+            console.log(
+              `    v${v.version_number}  ${chalk.gray(formatDate(v.crawled_at))}  ${chalk.gray(`hash:${v.content_hash}`)}`
+            );
+          }
+        } else {
+          const latest = versions[0];
+          const label = latest
+            ? `latest v${latest.version_number} ${chalk.gray(formatDate(latest.crawled_at))}`
+            : "no versions";
+          console.log(`    ${label} (${versions.length} version${versions.length === 1 ? "" : "s"})`);
         }
       }
+      if (remaining > 0) console.log(chalk.gray(`\n  ...${remaining} more document(s). Use --limit ${docs.length} to show all.`));
+      if (!opts.verbose) console.log(chalk.gray("  Use --verbose for per-version hashes or --json for raw records."));
       console.log();
     });
 
@@ -711,8 +744,10 @@ export function registerLibraryCommands(program: Command): void {
     .description("List supported documentation source types")
     .option("--readiness", "Audit readiness of indexed libraries by source")
     .option("-l, --library <slug>", "Limit readiness audit to one library")
+    .option("-n, --limit <n>", "Max readiness rows to show", String(DEFAULT_LIST_LIMIT))
+    .option("--verbose", "Show all readiness issues for visible rows")
     .option("--json", "Output as JSON")
-    .action((opts: { readiness?: boolean; library?: string; json?: boolean }) => {
+    .action((opts: { readiness?: boolean; library?: string; limit?: string; verbose?: boolean; json?: boolean }) => {
       if (opts.readiness) {
         const report = getSourceReadinessReport({ slug: opts.library });
         if (opts.json) {
@@ -727,18 +762,26 @@ export function registerLibraryCommands(program: Command): void {
               `${report.totals.indexed} indexed, ${report.totals.due} due`
           )
         );
-        for (const row of report.libraries) {
+        const limit = parseLimit(opts.limit);
+        const { visible, remaining } = takeWithMore(report.libraries, limit);
+        for (const row of visible) {
           const hasError = row.issues.some((issue) => issue.severity === "error");
           const marker = hasError ? chalk.red("error") : row.issues.length > 0 ? chalk.yellow("check") : chalk.green("ready");
           console.log(`\n  ${chalk.cyan(`/context/${row.library_slug}`)} ${chalk.bold(row.library_name)} ${chalk.gray(`[${row.source_type}]`)} ${marker}`);
           console.log(`    source: ${row.source_url ?? "(none)"}`);
           console.log(`    native refresh: ${row.can_refresh_without_external_retriever ? "yes" : "no"}`);
           console.log(`    indexed: ${row.documents} docs, ${row.chunks} chunks, ${row.artifacts} files`);
-          for (const issue of row.issues) {
+          const issues = opts.verbose ? row.issues : row.issues.slice(0, 2);
+          for (const issue of issues) {
             const color = issue.severity === "error" ? chalk.red : issue.severity === "warning" ? chalk.yellow : chalk.gray;
             console.log(color(`    ${issue.severity}: ${issue.message}`));
           }
+          if (!opts.verbose && row.issues.length > issues.length) {
+            console.log(chalk.gray(`    ...${row.issues.length - issues.length} more issue(s). Use --verbose for all issues.`));
+          }
         }
+        if (remaining > 0) console.log(chalk.gray(`\n  ...${remaining} more librar${remaining === 1 ? "y" : "ies"}. Use --limit ${report.libraries.length} to show all.`));
+        if (!opts.verbose) console.log(chalk.gray("  Use --verbose for all visible-row issues or --json for the full readiness report."));
         console.log();
         return;
       }
@@ -769,8 +812,10 @@ export function registerLibraryCommands(program: Command): void {
   program
     .command("docs <slug>")
     .description("List structured local docs files for a library")
+    .option("-n, --limit <n>", "Max documents to show", String(DEFAULT_LIST_LIMIT))
+    .option("--verbose", "Show hashes for visible documents")
     .option("--json", "Output as JSON")
-    .action((slug: string, opts: { json?: boolean }) => {
+    .action((slug: string, opts: { limit?: string; verbose?: boolean; json?: boolean }) => {
       const lib = getLibraryBySlug(slug);
       const docs = listDocuments(lib.id);
       const artifacts = listDocumentArtifacts(lib.slug);
@@ -788,15 +833,19 @@ export function registerLibraryCommands(program: Command): void {
         return;
       }
 
-      for (const doc of docs) {
+      const limit = parseLimit(opts.limit);
+      const { visible, remaining } = takeWithMore(docs, limit);
+      for (const doc of visible) {
         console.log(`  ${chalk.cyan(doc.file_path ?? "(missing file)")}`);
-        console.log(`    ${doc.title ?? doc.url}`);
-        if (doc.content_hash) console.log(`    hash: ${chalk.gray(doc.content_hash)}`);
+        console.log(`    ${truncateText(doc.title ?? doc.url, 140)}`);
+        if (opts.verbose && doc.content_hash) console.log(`    hash: ${chalk.gray(doc.content_hash)}`);
       }
 
       const totalBytes = artifacts.reduce((sum, artifact) => sum + artifact.size_bytes, 0);
+      if (remaining > 0) console.log(chalk.gray(`\n  ...${remaining} more document(s). Use --limit ${docs.length} to show all.`));
       console.log(chalk.gray(`\n  ${artifacts.length} artifact file(s), ${totalBytes} bytes`));
       if (manifest) console.log(chalk.gray(`  Manifest: ${manifest.relativePath}`));
+      if (!opts.verbose) console.log(chalk.gray("  Use --verbose for hashes or --json for raw document/artifact metadata."));
       console.log();
     });
 
@@ -808,8 +857,10 @@ export function registerLibraryCommands(program: Command): void {
     .option("-l, --library <slug>", "Limit to a specific library")
     .option("--create-tasks", "Persist pending refresh tasks for due libraries")
     .option("--tasks", "List persisted update tasks instead of computing a plan")
+    .option("-n, --limit <n>", "Max rows to show", String(DEFAULT_LIST_LIMIT))
+    .option("--verbose", "Show persisted task IDs and extra detail")
     .option("--json", "Output as JSON")
-    .action((opts: { library?: string; createTasks?: boolean; tasks?: boolean; json?: boolean }) => {
+    .action((opts: { library?: string; createTasks?: boolean; tasks?: boolean; limit?: string; verbose?: boolean; json?: boolean }) => {
       if (opts.tasks) {
         const tasks = listDocUpdateTasks();
         if (opts.json) {
@@ -821,12 +872,16 @@ export function registerLibraryCommands(program: Command): void {
           return;
         }
         console.log(chalk.bold(`\nDocs Update Tasks:\n`));
-        for (const task of tasks) {
-          console.log(`  ${chalk.cyan(task.id)} ${chalk.gray(`[${task.status}]`)} ${task.task_type}`);
-          console.log(`    library: ${task.library_id}`);
+        const limit = parseLimit(opts.limit);
+        const { visible, remaining } = takeWithMore(tasks, limit);
+        for (const task of visible) {
+          console.log(`  ${chalk.cyan(opts.verbose ? task.id : task.id.slice(0, 8))} ${chalk.gray(`[${task.status}]`)} ${task.task_type}`);
+          if (opts.verbose) console.log(`    library: ${task.library_id}`);
           console.log(`    reason: ${task.reason}`);
           console.log(`    scheduled: ${formatDate(task.scheduled_at)}`);
         }
+        if (remaining > 0) console.log(chalk.gray(`\n  ...${remaining} more task(s). Use --limit ${tasks.length} to show all.`));
+        if (!opts.verbose) console.log(chalk.gray("  Use --verbose for full task IDs and library IDs, or --json for raw task records."));
         console.log();
         return;
       }
@@ -847,13 +902,17 @@ export function registerLibraryCommands(program: Command): void {
       }
 
       console.log(chalk.bold(`\nDocs Refresh Plan:\n`));
-      for (const item of plan) {
+      const limit = parseLimit(opts.limit);
+      const { visible, remaining } = takeWithMore(plan, limit);
+      for (const item of visible) {
         const id = `/context/${item.library.slug}`;
         console.log(`  ${chalk.cyan(id)} ${chalk.bold(item.library.name)}`);
         console.log(`    reason: ${item.reason}`);
         console.log(`    due: ${formatDate(item.due_at)}`);
-        if (item.task) console.log(`    task: ${item.task.id}`);
+        if (opts.verbose && item.task) console.log(`    task: ${item.task.id}`);
       }
+      if (remaining > 0) console.log(chalk.gray(`\n  ...${remaining} more refresh item(s). Use --limit ${plan.length} to show all.`));
+      if (!opts.verbose) console.log(chalk.gray("  Use --verbose for task IDs or --json for raw refresh plan records."));
       console.log();
     });
 }

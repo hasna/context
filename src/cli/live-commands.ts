@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { getDefaultExternalRetriever, resolveExternalRetriever } from "../sources/refresh.js";
 import { runLiveUpdateCycle } from "../live/index.js";
+import { DEFAULT_LIST_LIMIT, parseLimit, takeWithMore, truncateText } from "./format.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -28,6 +29,7 @@ export function registerLiveCommands(program: Command): void {
     .option("--embed", "generate semantic embeddings after each refreshed source")
     .option("--embed-all", "re-embed existing chunks when --embed is set")
     .option("--embed-limit <n>", "maximum chunks to embed per refreshed source")
+    .option("-n, --limit <n>", "Max actions to show per cycle", String(DEFAULT_LIST_LIMIT))
     .option("--json", "Output JSON for --once")
     .action(async (opts: {
       interval?: string;
@@ -41,6 +43,7 @@ export function registerLiveCommands(program: Command): void {
       embed?: boolean;
       embedAll?: boolean;
       embedLimit?: string;
+      limit?: string;
       json?: boolean;
     }) => {
       const intervalMs = Math.max(1, parseInt(opts.interval ?? "86400", 10)) * 1000;
@@ -80,7 +83,9 @@ export function registerLiveCommands(program: Command): void {
           );
         }
 
-        for (const action of cycle.actions) {
+        const limit = parseLimit(opts.limit);
+        const { visible, remaining } = takeWithMore(cycle.actions, limit);
+        for (const action of visible) {
           const id = `/context/${action.library_slug}`;
           if (action.status === "planned") {
             console.log(chalk.cyan(`  planned ${id} (${action.reason})`));
@@ -95,8 +100,11 @@ export function registerLiveCommands(program: Command): void {
             printRefreshCoverage(action.result);
             printEmbeddingSummary(action.result);
           } else if (action.status === "failed") {
-            console.log(chalk.red(`  ✗ ${id}: ${action.error}`));
+            console.log(chalk.red(`  ✗ ${id}: ${truncateText(action.error, 180)}`));
           }
+        }
+        if (remaining > 0) {
+          console.log(chalk.gray(`  ...${remaining} more action(s). Use --limit ${cycle.actions.length} to show all, or --json with --once for raw records.`));
         }
 
         if (opts.once) return;

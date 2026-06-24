@@ -22,14 +22,14 @@ import { getLibraryDocsManifestArtifact, listDocumentArtifacts } from "../docs/a
 import { listDocumentationSources } from "../sources/index.js";
 import { getSourceReadinessReport } from "../sources/readiness.js";
 import { runVerification } from "../verify/index.js";
-import type { SeedSmokeGroup, VerificationOptions } from "../verify/index.js";
+import type { SeedSmokeGroup, VerificationOptions, VerificationReport, SourceSmokeCaseResult } from "../verify/index.js";
 import {
   embeddingCoverage,
   getEmbeddingConfig,
   embedText,
   semanticSearch,
 } from "../db/embeddings.js";
-import { bootstrapSeedSources } from "../seeds/bootstrap.js";
+import { bootstrapSeedSources, type SeedBootstrapReport } from "../seeds/bootstrap.js";
 import type { SeedLibraryGroup } from "../seeds/libraries.js";
 import { embedLibraryChunks } from "../semantic/index.js";
 import { runLiveUpdateCycle } from "../live/index.js";
@@ -42,6 +42,7 @@ import {
   listWebhookEndpoints,
   removeWebhookEndpoint,
 } from "../db/webhooks.js";
+import { DEFAULT_LIST_LIMIT, formatDate, takeWithMore, truncateText } from "../cli/format.js";
 
 export function registerLibraryTools(server: McpServer): void {
   // ─── resolve-library-id ───────────────────────────────────────────────────────
@@ -325,9 +326,10 @@ Provide a specific topic or query to get the most relevant chunks.`,
       path: z.string().optional().describe("Exact API path filter such as /v1/messages"),
       operation_id: z.string().optional().describe("Exact OpenAPI operationId filter"),
       limit: z.number().optional().default(20).describe("Maximum endpoints to return"),
+      verbose: z.boolean().optional().default(false).describe("Include full indexed endpoint text"),
       json: z.boolean().optional().default(false).describe("Return raw JSON instead of Markdown"),
     },
-    async ({ libraryId, query, method, path, operation_id, limit = 20, json = false }) => {
+    async ({ libraryId, query, method, path, operation_id, limit = 20, verbose = false, json = false }) => {
       try {
         const slug = libraryId.replace(/^\/context\//, "").replace(/^\//, "").trim();
         const library = getLibraryBySlug(slug);
@@ -359,8 +361,9 @@ Provide a specific topic or query to get the most relevant chunks.`,
           if (endpoint.summary) output += `${endpoint.summary}\n`;
           if (endpoint.tags.length) output += `Tags: ${endpoint.tags.join(", ")}\n`;
           output += `Source: ${endpoint.url}\n\n`;
-          output += `${endpoint.content}\n\n`;
+          if (verbose) output += `${endpoint.content}\n\n`;
         }
+        if (!verbose) output += `Set verbose=true for full endpoint text, or json=true for raw schema/request/response metadata.\n`;
 
         return { content: [{ type: "text", text: output.trim() }] };
       } catch (err) {
@@ -554,15 +557,28 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
   server.tool(
     "list-sources",
     "List supported documentation source types and their refresh defaults.",
-    {},
-    async () => ({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(listDocumentationSources(), null, 2),
-        },
-      ],
-    })
+    {
+      verbose: z.boolean().optional().default(false).describe("Include source descriptions"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON"),
+    },
+    async ({ verbose = false, json = false }) => {
+      const sources = listDocumentationSources();
+      if (json) {
+        return {
+          content: [{ type: "text", text: JSON.stringify(sources, null, 2) }],
+        };
+      }
+
+      const lines = ["Documentation sources:", ""];
+      for (const source of sources) {
+        lines.push(`- ${source.id}: ${source.name} (${source.nativeIngest}, ${source.origin})`);
+        lines.push(`  freshness: ${source.defaultFreshnessDays}d; retrieval: ${source.supportsWebCrawl ? "native + fallback" : "manual"}`);
+        if (verbose) lines.push(`  ${truncateText(source.description, 180)}`);
+      }
+      lines.push("");
+      lines.push("Set verbose=true for descriptions or json=true for raw source records.");
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
   );
 
   server.tool(
@@ -570,18 +586,38 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
     "Audit indexed libraries for source refresh readiness, native ingest availability, artifacts, and missing retriever keys.",
     {
       libraryId: z.string().optional().describe("Optional library slug or /context/<slug> ID"),
+      limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum libraries to include in compact output"),
+      verbose: z.boolean().optional().default(false).describe("Show all issues for visible libraries"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON"),
     },
-    async ({ libraryId }) => {
+    async ({ libraryId, limit = DEFAULT_LIST_LIMIT, verbose = false, json = false }) => {
       try {
         const slug = libraryId?.replace(/^\/context\//, "").trim();
         const report = getSourceReadinessReport({ slug });
+        if (json) {
+          return {
+            content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+          };
+        }
+        const { visible, remaining } = takeWithMore(report.libraries, limit);
+        const lines = [
+          "Source readiness:",
+          `${report.totals.libraries} libraries, ${report.totals.ready_for_native_refresh} native-refresh ready, ${report.totals.indexed} indexed, ${report.totals.due} due`,
+          "",
+        ];
+        for (const row of visible) {
+          const hasError = row.issues.some((issue) => issue.severity === "error");
+          const marker = hasError ? "error" : row.issues.length > 0 ? "check" : "ready";
+          lines.push(`- /context/${row.library_slug} ${row.library_name} [${row.source_type}] ${marker}`);
+          lines.push(`  indexed: ${row.documents} docs, ${row.chunks} chunks, ${row.artifacts} files; native refresh: ${row.can_refresh_without_external_retriever ? "yes" : "no"}`);
+          const issues = verbose ? row.issues : row.issues.slice(0, 2);
+          for (const issue of issues) lines.push(`  ${issue.severity}: ${issue.message}`);
+          if (!verbose && row.issues.length > issues.length) lines.push(`  ...${row.issues.length - issues.length} more issue(s)`);
+        }
+        if (remaining > 0) lines.push(`...${remaining} more libraries. Increase limit or use json=true for full records.`);
+        lines.push("Set verbose=true for all visible-row issues or json=true for the full readiness report.");
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(report, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: lines.join("\n") }],
         };
       } catch (err) {
         return {
@@ -640,6 +676,8 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
         .default(false)
         .describe("Fail smoke checks when page limits are reached or llms.txt full docs are missing"),
       ai_smoke: z.string().optional().describe("AI SDK backend id to smoke, or 'default'"),
+      output_limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum issue/smoke rows to include in compact output"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON report"),
     },
     async ({
       publish = false,
@@ -662,6 +700,8 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
       case_timeout_ms = 45_000,
       require_full_docs = false,
       ai_smoke,
+      output_limit = DEFAULT_LIST_LIMIT,
+      json = false,
     }) => {
       try {
         const shouldRunSeedSmoke = seed_smoke || Boolean(seed_groups?.length) || Boolean(seed_slugs?.length);
@@ -688,7 +728,7 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
           aiSmoke: ai_smoke ? (ai_smoke as VerificationOptions["aiSmoke"]) : undefined,
         });
         return {
-          content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+          content: [{ type: "text", text: json ? JSON.stringify(report, null, 2) : formatVerificationReport(report, output_limit) }],
           ...(report.ready ? {} : { isError: true }),
         };
       } catch (err) {
@@ -773,8 +813,11 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
   server.tool(
     "list-libraries",
     "List all libraries indexed in the local documentation store.",
-    {},
-    async () => {
+    {
+      limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum libraries to include in compact output"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON"),
+    },
+    async ({ limit = DEFAULT_LIST_LIMIT, json = false }) => {
       try {
         const libraries = listLibraries();
 
@@ -789,19 +832,29 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
           };
         }
 
-        const formatted = libraries.map((lib) => {
+        if (json) {
+          return {
+            content: [{ type: "text", text: JSON.stringify(libraries, null, 2) }],
+          };
+        }
+
+        const { visible, remaining } = takeWithMore(libraries, limit);
+        const formatted = visible.map((lib) => {
           const status =
             lib.chunk_count > 0
               ? `${lib.chunk_count} chunks, ${lib.document_count} pages`
               : "not indexed";
           return `- /context/${lib.slug} — ${lib.name}${lib.version ? ` v${lib.version}` : ""} (${status}, ${lib.source_type})`;
         }).join("\n");
+        const suffix = remaining > 0
+          ? `\n\n...${remaining} more libraries. Increase limit or use json=true for raw records.`
+          : "\n\nUse resolve-library-id for a specific library or json=true for raw records.";
 
         return {
           content: [
             {
               type: "text",
-              text: `${libraries.length} librar${libraries.length === 1 ? "y" : "ies"} indexed:\n\n${formatted}`,
+              text: `${libraries.length} librar${libraries.length === 1 ? "y" : "ies"} indexed:\n\n${formatted}${suffix}`,
             },
           ],
         };
@@ -859,14 +912,23 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
     "List structured local markdown docs files and SQLite document metadata for a library.",
     {
       libraryId: z.string().describe("Library slug or /context/<slug> ID"),
+      limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum documents to include in compact output"),
+      verbose: z.boolean().optional().default(false).describe("Include content hashes for visible documents"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON"),
     },
-    async ({ libraryId }) => {
+    async ({ libraryId, limit = DEFAULT_LIST_LIMIT, verbose = false, json = false }) => {
       try {
         const slug = libraryId.replace(/^\/context\//, "").trim();
         const library = getLibraryBySlug(slug);
         const documents = listDocuments(library.id);
         const artifacts = listDocumentArtifacts(library.slug);
         const manifest = getLibraryDocsManifestArtifact(library.slug);
+
+        if (json) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ library, documents, artifacts, manifest }, null, 2) }],
+          };
+        }
 
         if (documents.length === 0) {
           return {
@@ -880,15 +942,17 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
         }
 
         const lines = [`${library.name} docs files:`, ""];
-        for (const doc of documents) {
+        const { visible, remaining } = takeWithMore(documents, limit);
+        for (const doc of visible) {
           lines.push(`- ${doc.file_path ?? "(missing file)"}`);
-          lines.push(`  URL: ${doc.url}`);
-          if (doc.title) lines.push(`  Title: ${doc.title}`);
-          if (doc.content_hash) lines.push(`  Hash: ${doc.content_hash}`);
+          lines.push(`  ${truncateText(doc.title ?? doc.url, 160)}`);
+          if (verbose && doc.content_hash) lines.push(`  Hash: ${doc.content_hash}`);
         }
+        if (remaining > 0) lines.push(`...${remaining} more documents. Increase limit or use json=true for raw metadata.`);
         lines.push("");
         lines.push(`Artifacts on disk: ${artifacts.length}`);
         if (manifest) lines.push(`Manifest: ${manifest.relativePath}`);
+        lines.push(verbose ? "Use json=true for raw document/artifact metadata." : "Set verbose=true for hashes or json=true for raw document/artifact metadata.");
 
         return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err) {
@@ -908,22 +972,31 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
     {
       libraryId: z.string().optional().describe("Optional library slug or /context/<slug> ID"),
       createTasks: z.boolean().optional().default(false).describe("Persist pending refresh tasks"),
+      limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum refresh items to include in compact output"),
+      verbose: z.boolean().optional().default(false).describe("Include persisted task IDs when present"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON"),
     },
-    async ({ libraryId, createTasks = false }) => {
+    async ({ libraryId, createTasks = false, limit = DEFAULT_LIST_LIMIT, verbose = false, json = false }) => {
       try {
         const slug = libraryId?.replace(/^\/context\//, "").trim();
         const plan = getRefreshPlan({ slug, createTasks });
+        if (json) {
+          return { content: [{ type: "text", text: JSON.stringify(plan, null, 2) }] };
+        }
         if (plan.length === 0) {
           return { content: [{ type: "text", text: "No libraries are due for docs refresh." }] };
         }
 
         const lines = [`Docs refresh plan:`, ""];
-        for (const item of plan) {
+        const { visible, remaining } = takeWithMore(plan, limit);
+        for (const item of visible) {
           lines.push(`- /context/${item.library.slug} ${item.library.name}`);
           lines.push(`  Reason: ${item.reason}`);
-          lines.push(`  Due: ${item.due_at}`);
-          if (item.task) lines.push(`  Task: ${item.task.id}`);
+          lines.push(`  Due: ${formatDate(item.due_at)}`);
+          if (verbose && item.task) lines.push(`  Task: ${item.task.id}`);
         }
+        if (remaining > 0) lines.push(`...${remaining} more refresh item(s). Increase limit or use json=true for raw records.`);
+        lines.push(verbose ? "Use json=true for raw refresh plan records." : "Set verbose=true for task IDs or json=true for raw refresh plan records.");
         return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err) {
         return {
@@ -954,8 +1027,11 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
       embed: z.boolean().optional().default(false).describe("Generate semantic embeddings after each refreshed source"),
       embed_all: z.boolean().optional().default(false).describe("Re-embed existing chunks when embed is true"),
       embed_limit: z.number().optional().describe("Maximum chunks to embed per refreshed source"),
+      limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum actions to include in compact output"),
+      verbose: z.boolean().optional().default(false).describe("Include errors and coverage details for visible actions"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON"),
     },
-    async ({ max_pages = 30, retriever, crawler, plan_only = false, native_only = false, create_tasks, case_timeout_ms = 45_000, embed = false, embed_all = false, embed_limit }) => {
+    async ({ max_pages = 30, retriever, crawler, plan_only = false, native_only = false, create_tasks, case_timeout_ms = 45_000, embed = false, embed_all = false, embed_limit, limit = DEFAULT_LIST_LIMIT, verbose = false, json = false }) => {
       try {
         const cycle = await runLiveUpdateCycle({
           maxPages: max_pages,
@@ -968,7 +1044,23 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
           embedAll: embed_all,
           embedLimit: embed_limit,
         });
-        return { content: [{ type: "text", text: JSON.stringify(cycle, null, 2) }] };
+        if (json) {
+          return { content: [{ type: "text", text: JSON.stringify(cycle, null, 2) }] };
+        }
+        const { visible, remaining } = takeWithMore(cycle.actions, limit);
+        const lines = [
+          `Live update cycle: ${cycle.plan_count} planned, ${cycle.refreshed_count} refreshed, ${cycle.skipped_count} skipped, ${cycle.failed_count} failed`,
+          "",
+        ];
+        for (const action of visible) {
+          lines.push(`- /context/${action.library_slug} ${action.library_name} [${action.status}]`);
+          lines.push(`  reason: ${action.reason}; due: ${formatDate(action.due_at)}`);
+          if (verbose && action.error) lines.push(`  error: ${truncateText(action.error, 180)}`);
+          if (verbose && action.result) lines.push(`  coverage: ${formatRefreshCoverage(action.result)}`);
+        }
+        if (remaining > 0) lines.push(`...${remaining} more action(s). Increase limit or use json=true for raw cycle records.`);
+        lines.push(verbose ? "Use json=true for raw cycle records." : "Set verbose=true for per-action errors/coverage or json=true for raw cycle records.");
+        return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err) {
         return {
           content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
@@ -981,10 +1073,22 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
   server.tool(
     "list-webhooks",
     "List configured docs update webhook endpoints.",
-    {},
-    async () => ({
-      content: [{ type: "text", text: JSON.stringify(listWebhookEndpoints(), null, 2) }],
-    })
+    {
+      json: z.boolean().optional().default(false).describe("Return raw JSON"),
+    },
+    async ({ json = false }) => {
+      const endpoints = listWebhookEndpoints();
+      if (json) return { content: [{ type: "text", text: JSON.stringify(endpoints, null, 2) }] };
+      if (endpoints.length === 0) return { content: [{ type: "text", text: "No webhook endpoints configured." }] };
+      const lines = ["Webhook endpoints:", ""];
+      for (const endpoint of endpoints) {
+        lines.push(`- ${endpoint.id} ${endpoint.active ? "active" : "inactive"}`);
+        lines.push(`  ${endpoint.url}`);
+        lines.push(`  events: ${endpoint.events.join(", ") || "all"}`);
+      }
+      lines.push("Use json=true for raw endpoint records.");
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
   );
 
   server.tool(
@@ -1030,10 +1134,25 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
   server.tool(
     "list-webhook-deliveries",
     "List recent webhook deliveries.",
-    {},
-    async () => ({
-      content: [{ type: "text", text: JSON.stringify(listWebhookDeliveries(), null, 2) }],
-    })
+    {
+      limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum deliveries to include in compact output"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON"),
+    },
+    async ({ limit = DEFAULT_LIST_LIMIT, json = false }) => {
+      const deliveries = listWebhookDeliveries();
+      if (json) return { content: [{ type: "text", text: JSON.stringify(deliveries, null, 2) }] };
+      if (deliveries.length === 0) return { content: [{ type: "text", text: "No webhook deliveries." }] };
+      const { visible, remaining } = takeWithMore(deliveries, limit);
+      const lines = ["Webhook deliveries:", ""];
+      for (const delivery of visible) {
+        lines.push(`- ${delivery.id} [${delivery.status}] ${delivery.event}`);
+        if (delivery.response_status) lines.push(`  response: ${delivery.response_status}`);
+        if (delivery.error) lines.push(`  error: ${truncateText(delivery.error, 180)}`);
+      }
+      if (remaining > 0) lines.push(`...${remaining} more delivery record(s). Increase limit or use json=true for raw records.`);
+      lines.push("Use json=true for raw delivery records.");
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
   );
 
   server.tool(
@@ -1042,14 +1161,24 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
     {
       event: z.string().optional().default("docs.refreshed").describe("Event name to emit"),
       payload: z.record(z.unknown()).optional().describe("Additional payload fields"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON"),
     },
-    async ({ event = "docs.refreshed", payload }) => {
+    async ({ event = "docs.refreshed", payload, json = false }) => {
       try {
         const deliveries = await emitWebhookEvent(event, {
           test: true,
           emitted_by: "context MCP tool",
           ...(payload ?? {}),
         });
+        if (!json) {
+          const failed = deliveries.filter((delivery) => delivery.status === "failed").length;
+          return {
+            content: [{
+              type: "text",
+              text: `Created ${deliveries.length} webhook deliver${deliveries.length === 1 ? "y" : "ies"} for ${event}; ${failed} failed. Use json=true for raw delivery records.`,
+            }],
+          };
+        }
         return { content: [{ type: "text", text: JSON.stringify(deliveries, null, 2) }] };
       } catch (err) {
         return {
@@ -1178,6 +1307,8 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
         .optional()
         .default(false)
         .describe("Only process imported open-connectors sources"),
+      output_limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum item rows to include in compact output"),
+      json: z.boolean().optional().default(false).describe("Return raw JSON report"),
     },
     async ({
       groups,
@@ -1196,6 +1327,8 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
       open_connectors_path,
       open_connectors_enabled_only = false,
       open_connectors_only = false,
+      output_limit = DEFAULT_LIST_LIMIT,
+      json = false,
     }) => {
       try {
         const report = await bootstrapSeedSources({
@@ -1219,7 +1352,7 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
           content: [
             {
               type: "text",
-              text: JSON.stringify(report, null, 2),
+              text: json ? JSON.stringify(report, null, 2) : formatSeedBootstrapReport(report, output_limit),
             },
           ],
           ...(report.failed_count > 0 ? { isError: true } : {}),
@@ -1232,6 +1365,93 @@ After indexing, use resolve-library-id and query-docs to access the docs.`,
       }
     }
   );
+}
+
+function formatVerificationReport(report: VerificationReport, outputLimit: number): string {
+  const lines = [
+    `Context verification: ${report.ready ? "ready" : "not ready"}`,
+    `AI SDK: ${report.ai.configured_count} configured${report.ai.configured.length ? ` (${report.ai.configured.join(", ")})` : ""}`,
+    `Retrievers: default=${report.retrievers.default}, exa=${formatBool(report.retrievers.exa)}, firecrawl=${formatBool(report.retrievers.firecrawl)}`,
+  ];
+
+  if (report.publish) {
+    lines.push(`Publish: ${report.publish.ready ? "ready" : "not ready"} (${report.publish.package.name}@${report.publish.package.version})`);
+  }
+
+  if (report.sources) {
+    const totals = report.sources.totals;
+    lines.push(`Sources: ${totals.libraries} libraries, ${totals.ready_for_native_refresh} native-refresh ready, ${totals.indexed} indexed, ${totals.due} due`);
+  }
+
+  const smokeSummaries = [
+    ["local smoke", report.smoke.local],
+    ["external smoke", report.smoke.external],
+    ["seed smoke", report.smoke.seed],
+    ["required corpus smoke", report.smoke.required_corpus],
+  ] as const;
+  for (const [label, cases] of smokeSummaries) {
+    if (cases.length > 0) lines.push(`${label}: ${formatSmokeCases(cases)}`);
+  }
+  if (report.smoke.semantic) {
+    const smoke = report.smoke.semantic;
+    lines.push(`semantic smoke: ${smoke.status}, ${smoke.embedded}/${smoke.total_chunks} chunks embedded`);
+  }
+  if (report.smoke.refresh_loop) {
+    const smoke = report.smoke.refresh_loop;
+    lines.push(`refresh loop smoke: ${smoke.status}, task=${formatBool(smoke.task_completed)}, webhook=${formatBool(smoke.webhook_delivered)}`);
+  }
+  if (report.smoke.required_live_update) {
+    const smoke = report.smoke.required_live_update;
+    lines.push(`required live update smoke: ${smoke.status}, ${smoke.search_ready_count}/${smoke.selected_count} search-ready, ${smoke.failed_count} failed`);
+  }
+  if (report.ai.smoke) {
+    lines.push(`AI smoke: ${report.ai.smoke.status}${report.ai.smoke.backend ? ` (${report.ai.smoke.backend})` : ""}`);
+  }
+
+  if (report.issues.length > 0) {
+    const { visible, remaining } = takeWithMore(report.issues, outputLimit);
+    lines.push("", "Issues:");
+    for (const issue of visible) {
+      lines.push(`- ${issue.severity}: ${issue.message}`);
+    }
+    if (remaining > 0) lines.push(`...${remaining} more issue(s). Increase output_limit or set json=true for raw records.`);
+  }
+
+  lines.push("", "Set json=true for the full verification report.");
+  return lines.join("\n");
+}
+
+function formatSmokeCases(cases: SourceSmokeCaseResult[]): string {
+  const passed = cases.filter((item) => item.status === "passed").length;
+  const failed = cases.filter((item) => item.status === "failed").length;
+  const skipped = cases.filter((item) => item.status === "skipped").length;
+  return `${passed}/${cases.length} passed${failed ? `, ${failed} failed` : ""}${skipped ? `, ${skipped} skipped` : ""}`;
+}
+
+function formatSeedBootstrapReport(report: SeedBootstrapReport, outputLimit: number): string {
+  const lines = [
+    `Seed libraries: ${report.selected_count} selected, ${report.added_count} added, ${report.updated_count} updated, ${report.refreshed_count} refreshed, ${report.failed_count} failed`,
+  ];
+  if (report.crawl) lines.push(`Refresh: retriever=${report.retriever}, pages=${report.max_pages}, new_only=${formatBool(report.new_only)}`);
+
+  const { visible, remaining } = takeWithMore(report.items, outputLimit);
+  if (visible.length > 0) lines.push("", "Items:");
+  for (const item of visible) {
+    const id = item.library_slug ? `/context/${item.library_slug}` : item.seed_slug;
+    lines.push(`- ${item.status} ${id} ${item.library_name}${item.source_type ? ` [${item.source_type}]` : ""}`);
+    if (item.result) {
+      lines.push(`  ${item.result.pages_ingested} pages, ${item.result.chunks_indexed} chunks, ${item.result.files_written} files via ${item.result.ingest_mode}`);
+    }
+    if (item.refresh_skipped) lines.push("  refresh skipped");
+    if (item.error) lines.push(`  error: ${truncateText(item.error, 180)}`);
+  }
+  if (remaining > 0) lines.push(`...${remaining} more item(s). Increase output_limit or set json=true for raw records.`);
+  lines.push("", "Set json=true for the full seed report.");
+  return lines.join("\n");
+}
+
+function formatBool(value: boolean): string {
+  return value ? "yes" : "no";
 }
 
 function selectRetriever(

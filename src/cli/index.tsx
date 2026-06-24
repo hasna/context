@@ -36,7 +36,7 @@ import { registerWebhookCommands } from "./webhook-commands.js";
 import { registerLiveCommands } from "./live-commands.js";
 import { registerPublishCommands } from "./publish-commands.js";
 import { registerVerifyCommands } from "./verify-commands.js";
-import { formatDate } from "./format.js";
+import { DEFAULT_LIST_LIMIT, formatDate, parseLimit, takeWithMore, truncateText } from "./format.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
@@ -60,8 +60,10 @@ program
   .description("Explore the knowledge graph")
   .option("-s, --search <query>", "Search KG nodes")
   .option("-l, --library <slug>", "Show relations for a specific library")
+  .option("-n, --limit <n>", "Max rows to show", String(DEFAULT_LIST_LIMIT))
+  .option("--verbose", "Show descriptions and all visible relation metadata")
   .option("--json", "Output as JSON")
-  .action((opts: { search?: string; library?: string; json?: boolean }) => {
+  .action((opts: { search?: string; library?: string; limit?: string; verbose?: boolean; json?: boolean }) => {
     if (opts.search) {
       const nodes = searchNodes(opts.search);
       if (opts.json) {
@@ -69,10 +71,14 @@ program
         return;
       }
       console.log(chalk.bold(`\nKG nodes matching "${opts.search}":\n`));
-      for (const n of nodes) {
+      const limit = parseLimit(opts.limit);
+      const { visible, remaining } = takeWithMore(nodes, limit);
+      for (const n of visible) {
         console.log(`  ${chalk.gray(`[${n.type}]`)} ${chalk.bold(n.name)}`);
-        if (n.description) console.log(`    ${chalk.gray(n.description)}`);
+        if (opts.verbose && n.description) console.log(`    ${chalk.gray(truncateText(n.description, 180))}`);
       }
+      if (remaining > 0) console.log(chalk.gray(`\n  ...${remaining} more node(s). Use --limit ${nodes.length} to show all.`));
+      if (!opts.verbose) console.log(chalk.gray("  Use --verbose for descriptions or --json for raw KG records."));
       console.log();
       return;
     }
@@ -102,12 +108,17 @@ program
       if (withRels.relations.length === 0) {
         console.log(chalk.gray("  No relations found"));
       }
-      for (const rel of withRels.relations) {
+      const limit = parseLimit(opts.limit);
+      const { visible, remaining } = takeWithMore(withRels.relations, limit);
+      for (const rel of visible) {
         const arrow = rel.direction === "outgoing" ? "→" : "←";
         console.log(
           `  ${arrow} ${chalk.gray(rel.relation.padEnd(16))} ${chalk.bold(rel.node.name)} ${chalk.gray(`[${rel.node.type}]`)}`
         );
+        if (opts.verbose && rel.node.description) console.log(`    ${chalk.gray(truncateText(rel.node.description, 180))}`);
       }
+      if (remaining > 0) console.log(chalk.gray(`\n  ...${remaining} more relation(s). Use --limit ${withRels.relations.length} to show all.`));
+      if (!opts.verbose) console.log(chalk.gray("  Use --verbose for related node descriptions or --json for raw relation records."));
       console.log();
       return;
     }
@@ -119,18 +130,26 @@ program
       return;
     }
     console.log(chalk.bold(`\nKnowledge Graph — ${nodes.length} nodes:\n`));
+    const limit = parseLimit(opts.limit);
     const byType = new Map<string, typeof nodes>();
     for (const n of nodes) {
       const list = byType.get(n.type) ?? [];
       list.push(n);
       byType.set(n.type, list);
     }
+    let shown = 0;
     for (const [type, typeNodes] of byType) {
+      if (shown >= limit) break;
       console.log(chalk.gray(`  ${type}:`));
       for (const n of typeNodes) {
+        if (shown >= limit) break;
         console.log(`    ${chalk.bold(n.name)}`);
+        if (opts.verbose && n.description) console.log(`      ${chalk.gray(truncateText(n.description, 180))}`);
+        shown += 1;
       }
     }
+    if (nodes.length > shown) console.log(chalk.gray(`\n  ...${nodes.length - shown} more node(s). Use --limit ${nodes.length} to show all.`));
+    if (!opts.verbose) console.log(chalk.gray("  Use --verbose for descriptions or --json for raw KG records."));
     console.log();
   });
 
@@ -240,8 +259,9 @@ program
 program
   .command("repos")
   .description("List all locally indexed contexts")
+  .option("-n, --limit <n>", "Max contexts to show", String(DEFAULT_LIST_LIMIT))
   .option("--json", "Output as JSON")
-  .action((opts: { json?: boolean }) => {
+  .action((opts: { limit?: string; json?: boolean }) => {
     const contexts = listContexts();
 
     if (contexts.length === 0) {
@@ -256,7 +276,9 @@ program
     }
 
     console.log(chalk.bold(`\n${contexts.length} context ${contexts.length === 1 ? "" : "s"} indexed:\n`));
-    for (const ctx of contexts) {
+    const limit = parseLimit(opts.limit);
+    const { visible, remaining } = takeWithMore(contexts, limit);
+    for (const ctx of visible) {
       const status = `${ctx.file_count} files, ${ctx.entity_count} entities`;
       const lastIndexed = ctx.last_indexed_at
         ? `last indexed ${formatDate(ctx.last_indexed_at)}`
@@ -264,6 +286,10 @@ program
       console.log(`  ${chalk.bold(ctx.name)} ${chalk.gray(`(${ctx.type}: ${ctx.language ?? "Unknown"})`)}`);
       console.log(`    Path: ${chalk.cyan(ctx.path)}`);
       console.log(`    ${status} — ${chalk.gray(lastIndexed)}`);
+      console.log();
+    }
+    if (remaining > 0) {
+      console.log(chalk.gray(`  ...${remaining} more context(s). Use --limit ${contexts.length} to show all, or --json for raw records.`));
       console.log();
     }
   });
@@ -313,8 +339,8 @@ program
         console.log(`  ${chalk.bold(result.item.name)} ${chalk.gray(`${score}% related`)}`);
         console.log(`  Path: ${chalk.cyan(result.item.path)}`);
         console.log(`  Lines: ${result.item.line_count}`);
-        const preview = (result.item.content ?? "").slice(0, 200).replace(/\n/g, " ");
-        console.log(`  Preview: ${chalk.gray(preview)}...`);
+        const preview = truncateText(result.item.content, 200);
+        console.log(`  Preview: ${chalk.gray(preview)}`);
       } else if (result.entity) {
         console.log(`  ${chalk.bold(result.entity.name)} ${chalk.gray(`(${result.entity.type})`)} ${chalk.green(`${score}%`)}`);
         if (result.entity.signature) {
@@ -334,8 +360,10 @@ program
   .description("Get all files and entities related to a file")
   .option("-f, --file <filepath>", "Specific file path within the context")
   .option("-d, --depth <n>", "Traversal depth", "2")
+  .option("-n, --limit <n>", "Max entities and related files to show", String(DEFAULT_LIST_LIMIT))
+  .option("--verbose", "Show the same capped detail with explicit disclosure hints")
   .option("--json", "Output as JSON")
-  .action((path: string, opts: { file?: string; depth?: string; json?: boolean }) => {
+  .action((path: string, opts: { file?: string; depth?: string; limit?: string; verbose?: boolean; json?: boolean }) => {
     const ctx = getContextByPath(path);
     if (!ctx) {
       console.log(chalk.yellow(`Context not indexed at ${path}`));
@@ -367,24 +395,27 @@ program
     console.log(chalk.bold(`\nRelations for ${matched.name}\n`));
     console.log(`Path: ${chalk.cyan(matched.path)}`);
     console.log(`Entities: ${entities.length}`);
+    const limit = parseLimit(opts.limit);
 
     if (entities.length > 0) {
       console.log(chalk.bold("\nCode Entities:"));
-      for (const entity of entities) {
+      const { visible, remaining } = takeWithMore(entities, limit);
+      for (const entity of visible) {
         console.log(`  ${chalk.cyan(entity.type)} ${chalk.bold(entity.name)} (lines ${entity.start_line}-${entity.end_line})`);
       }
+      if (remaining > 0) console.log(chalk.gray(`  ...${remaining} more entities. Use --limit ${entities.length} to show all, or --json for raw records.`));
     }
 
     if (relatedItems.length > 0) {
       console.log(chalk.bold("\nRelated Files:"));
-      for (const { item, distance, relation } of relatedItems.slice(0, 20)) {
+      const { visible, remaining } = takeWithMore(relatedItems, limit);
+      for (const { item, distance, relation } of visible) {
         console.log(`  ${chalk.bold(item.name)} ${chalk.gray(`(distance: ${distance})`)}`);
         console.log(`    via: ${relation.relation_type}`);
       }
-      if (relatedItems.length > 20) {
-        console.log(chalk.gray(`  ... and ${relatedItems.length - 20} more`));
-      }
+      if (remaining > 0) console.log(chalk.gray(`  ...${remaining} more related files. Use --limit ${relatedItems.length} to show all, or --json for raw records.`));
     }
+    if (!opts.verbose) console.log(chalk.gray("\nUse --limit to disclose more rows or --json for the full relation graph."));
     console.log();
   });
 
@@ -395,8 +426,9 @@ program
   .description("Search indexed contexts for files or entities")
   .option("-r, --repo <path>", "Context path to search within")
   .option("-t, --type <type>", "Search type: all|files|entities", "all")
+  .option("-n, --limit <n>", "Max files/entities per group", String(DEFAULT_LIST_LIMIT))
   .option("--json", "Output as JSON")
-  .action((query: string, opts: { repo?: string; type?: string; json?: boolean }) => {
+  .action((query: string, opts: { repo?: string; type?: string; limit?: string; json?: boolean }) => {
     let contextId: string | undefined;
     if (opts.repo) {
       const ctx = getContextByPath(opts.repo);
@@ -408,16 +440,18 @@ program
     }
 
     const type = opts.type ?? "all";
+    const limit = parseLimit(opts.limit);
     const results: string[] = [];
 
     if (type === "all" || type === "files") {
       const items = searchContextItems(query, contextId);
       if (items.length > 0) {
         results.push(chalk.bold(`\nFiles matching "${query}" (${items.length}):\n`));
-        for (const item of items.slice(0, 20)) {
+        const { visible, remaining } = takeWithMore(items, limit);
+        for (const item of visible) {
           results.push(`  ${chalk.bold(item.name)} ${chalk.gray(item.path)} (${item.line_count} lines)`);
         }
-        if (items.length > 20) results.push(chalk.gray(`  ... and ${items.length - 20} more`));
+        if (remaining > 0) results.push(chalk.gray(`  ...${remaining} more files. Use --limit ${items.length} to show all.`));
       }
     }
 
@@ -425,10 +459,11 @@ program
       const entities = searchCodeEntities(query, contextId);
       if (entities.length > 0) {
         results.push(chalk.bold(`\nEntities matching "${query}" (${entities.length}):\n`));
-        for (const entity of entities.slice(0, 20)) {
+        const { visible, remaining } = takeWithMore(entities, limit);
+        for (const entity of visible) {
           results.push(`  ${chalk.cyan(entity.type)} ${chalk.bold(entity.name)} in ${chalk.gray(entity.item_id)}`);
         }
-        if (entities.length > 20) results.push(chalk.gray(`  ... and ${entities.length - 20} more`));
+        if (remaining > 0) results.push(chalk.gray(`  ...${remaining} more entities. Use --limit ${entities.length} to show all.`));
       }
     }
 
