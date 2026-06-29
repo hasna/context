@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { buildServer } from "./index.js";
+import { buildServer, isMcpEntrypointPath } from "./index.js";
 import { handleMcpRequest, resolveMcpHttpPort, DEFAULT_MCP_HTTP_PORT } from "./http.js";
 
 describe("context MCP HTTP transport", () => {
@@ -77,5 +77,13 @@ describe("context MCP HTTP transport", () => {
 describe("context buildServer", () => {
   test("registers tools for stdio and HTTP modes", () => {
     expect(buildServer()).toBeDefined();
+  });
+
+  test("does not treat bundled server entrypoints as MCP direct runs", () => {
+    expect(isMcpEntrypointPath("/repo/dist/mcp/index.js")).toBe(true);
+    expect(isMcpEntrypointPath("/repo/src/mcp/index.ts")).toBe(true);
+    expect(isMcpEntrypointPath("/home/hasna/.bun/bin/context-mcp")).toBe(true);
+    expect(isMcpEntrypointPath("/repo/dist/server/index.js")).toBe(false);
+    expect(isMcpEntrypointPath("/home/hasna/.bun/bin/context-serve")).toBe(false);
   });
 });

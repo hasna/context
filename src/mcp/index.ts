@@ -57,10 +57,6 @@ function handleMetaArgs(): boolean {
   return false;
 }
 
-if (handleMetaArgs()) {
-  process.exit(0);
-}
-
 export function buildServer(): McpServer {
 const server = new McpServer({ name: "context", version: pkg.version });
 registerContextStorageTools(server);
@@ -743,12 +739,21 @@ async function main(): Promise<void> {
   startMcpHttpServer({ name: "context", port: resolveMcpHttpPort(args), buildServer });
 }
 
-const isDirectRun =
-  import.meta.url === `file://${process.argv[1]}` ||
-  process.argv[1]?.endsWith("mcp/index.ts") ||
-  process.argv[1]?.endsWith("mcp/index.js");
+export function isMcpEntrypointPath(entrypoint?: string): boolean {
+  const normalized = entrypoint?.replace(/\\/g, "/") ?? "";
+  return normalized === "context-mcp"
+    || normalized.endsWith("/context-mcp")
+    || normalized.endsWith("/mcp/index.ts")
+    || normalized.endsWith("/mcp/index.js");
+}
+
+const isDirectRun = isMcpEntrypointPath(process.argv[1]);
 
 if (isDirectRun) {
+  if (handleMetaArgs()) {
+    process.exit(0);
+  }
+
   main().catch((err) => {
     console.error("Fatal error:", err);
     process.exit(1);

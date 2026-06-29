@@ -33,7 +33,7 @@ export type {
   SyncMeta,
   SyncResult,
 } from "./db/storage-sync.js";
-export { PgAdapterAsync } from "./db/remote-storage.js";
+export { PgAdapterAsync, buildPgPoolConfig, isLocalPostgresHost } from "./db/remote-storage.js";
 export * from "./db/libraries.js";
 export * from "./db/documents.js";
 export * from "./db/chunks.js";

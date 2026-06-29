@@ -23,4 +23,4 @@ export {
 } from "./db/storage-sync.js";
 export type { StorageEnv, StorageMode, StorageStatus, StorageSyncMeta, StorageSyncResult, SyncMeta, SyncResult } from "./db/storage-sync.js";
 export { PG_MIGRATIONS } from "./db/pg-migrations.js";
-export { PgAdapterAsync } from "./db/remote-storage.js";
+export { PgAdapterAsync, buildPgPoolConfig, isLocalPostgresHost } from "./db/remote-storage.js";
