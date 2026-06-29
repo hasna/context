@@ -15,7 +15,6 @@
         "@ai-sdk/perplexity": "^3.0.33",
         "@ai-sdk/togetherai": "^2.0.53",
         "@ai-sdk/xai": "^3.0.93",
-        "@hasna/cloud": "0.1.24",
         "@hasna/events": "^0.1.6",
         "@mendable/firecrawl-js": "^4.16.0",
         "@modelcontextprotocol/sdk": "^1.12.1",
@@ -67,8 +66,6 @@
     "@ai-sdk/xai": ["@ai-sdk/xai@3.0.94", "", { "dependencies": { "@ai-sdk/openai-compatible": "2.0.49", "@ai-sdk/provider": "3.0.10", "@ai-sdk/provider-utils": "4.0.28" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-s+MP95tgdzPtchpcNR1aVBMhuB6lFEqS6Pgh0SsgOcnUexLIZPNkkVdBJ1z1s7nvUrhC25uBg4zJ+2QGvK/XCQ=="],
 
     "@alcalzone/ansi-tokenize": ["@alcalzone/ansi-tokenize@0.1.3", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^4.0.0" } }, "sha512-3yWxPTq3UQ/FY9p1ErPxIyfT64elWaMvM9lIHnaqpyft63tkxodF5aUElYHrdisWve5cETkh1+KBw1yJuW0aRw=="],
-
-    "@hasna/cloud": ["@hasna/cloud@0.1.24", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.12.1", "commander": "^13.1.0", "pg": "^8.13.3", "zod": "^3.24.2" }, "bin": { "cloud": "dist/cli/index.js", "cloud-mcp": "dist/mcp/index.js" } }, "sha512-s8Vv+VdvOxN0UzlYgonMaT/V7X4YTuejvT45NQB7LIeLLp0IS/gF7DnNiRoQCl0P+pPrJVjCl61F34jmczzFTA=="],
 
     "@hasna/events": ["@hasna/events@0.1.6", "", { "dependencies": { "commander": "^13.1.0" }, "bin": { "events": "dist/cli/index.js", "hasna-events": "dist/cli/index.js" } }, "sha512-rKLxjBIat45UxciUwh9hKM63l/mcurJXAhgVkYHvrsGnOK9HwExrwgOlylNzDBDb+huiQw9DWdLb31q5oWDfIw=="],
 
