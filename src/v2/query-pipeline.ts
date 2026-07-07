@@ -420,4 +420,3 @@ function versionMention(prompt: string): string | null {
 function stableId(prefix: string, value: string): string {
   return `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 20)}`;
 }
-
