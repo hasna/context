@@ -7,6 +7,7 @@ import {
   listWebhookEndpoints,
   removeWebhookEndpoint,
 } from "../db/webhooks.js";
+import { DEFAULT_LIST_LIMIT, parseLimit, takeWithMore, truncateText } from "./format.js";
 
 function parseEvents(value?: string): string[] | undefined {
   return value?.split(",").map((event) => event.trim()).filter(Boolean);
@@ -37,6 +38,7 @@ export function registerWebhookCommands(program: Command): void {
         console.log(`    url: ${endpoint.url}`);
         console.log(`    events: ${endpoint.events.join(", ") || "all"}`);
       }
+      console.log(chalk.gray("\nUse --json for raw endpoint records."));
       console.log();
     });
 
@@ -70,8 +72,9 @@ export function registerWebhookCommands(program: Command): void {
   webhooks
     .command("deliveries")
     .description("List webhook deliveries")
+    .option("-n, --limit <n>", "Max deliveries to show", String(DEFAULT_LIST_LIMIT))
     .option("--json", "Output as JSON")
-    .action((opts: { json?: boolean }) => {
+    .action((opts: { limit?: string; json?: boolean }) => {
       const deliveries = listWebhookDeliveries();
       if (opts.json) {
         console.log(JSON.stringify(deliveries, null, 2));
@@ -82,11 +85,15 @@ export function registerWebhookCommands(program: Command): void {
         return;
       }
       console.log(chalk.bold("\nWebhook Deliveries\n"));
-      for (const delivery of deliveries.slice(0, 50)) {
+      const limit = parseLimit(opts.limit);
+      const { visible, remaining } = takeWithMore(deliveries, limit);
+      for (const delivery of visible) {
         console.log(`  ${chalk.cyan(delivery.id)} ${chalk.gray(`[${delivery.status}]`)} ${delivery.event}`);
         if (delivery.response_status) console.log(`    response: ${delivery.response_status}`);
-        if (delivery.error) console.log(`    error: ${delivery.error.slice(0, 160)}`);
+        if (delivery.error) console.log(`    error: ${truncateText(delivery.error, 160)}`);
       }
+      if (remaining > 0) console.log(chalk.gray(`\n  ...${remaining} more delivery record(s). Use --limit ${deliveries.length} to show all.`));
+      console.log(chalk.gray("Use --json for raw delivery records."));
       console.log();
     });
 

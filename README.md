@@ -36,6 +36,23 @@ context publish-check
 context ai status
 ```
 
+CLI output is compact by default for agent terminals: list/search/history/status
+commands cap rows, truncate long text, and print hints for the next level of
+detail. Use `--limit <n>` to raise row caps, `--verbose` for fuller human
+details, and `--json` for machine-readable full records where available:
+
+```bash
+context list --limit 50 --verbose
+context search "useEffect cleanup" --library react --verbose
+context docs react --limit 50 --verbose
+context history react --json
+context kg --limit 100
+```
+
+MCP tools follow the same gradual disclosure rule. Compact text is the default
+for list/status/history-style tools; pass `limit`, `verbose`, or `json=true`
+when an agent needs more rows, fuller text, or raw records.
+
 Docs are stored in SQLite for catalog/search and as structured Markdown artifacts
 under `~/.hasna/apps/knowledge/docs/<library>/`. Each library folder also gets a
 `manifest.json` that maps saved Markdown files back to SQLite document metadata,

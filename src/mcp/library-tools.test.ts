@@ -103,8 +103,18 @@ describe("registerLibraryTools", () => {
     expect(result.isError).toBeUndefined();
     expect(result.content[0]?.text).toContain("## POST /widgets");
     expect(result.content[0]?.text).toContain("Operation ID: createMcpWidget");
-    expect(result.content[0]?.text).toContain("Widget created");
-    expect(result.content[0]?.text).toContain("application/json: McpWidget");
+    expect(result.content[0]?.text).toContain("Create MCP widget");
+    expect(result.content[0]?.text).toContain("Set verbose=true");
+    expect(result.content[0]?.text).not.toContain("application/json: McpWidget");
+
+    const verbose = await queryEndpoints!({
+      libraryId: `/context/${library.slug}`,
+      operation_id: "createMcpWidget",
+      verbose: true,
+    });
+    expect(verbose.isError).toBeUndefined();
+    expect(verbose.content[0]?.text).toContain("Widget created");
+    expect(verbose.content[0]?.text).toContain("application/json: McpWidget");
   });
 
   it("registers build-docs-context for indexed docs", async () => {
@@ -147,6 +157,7 @@ describe("registerLibraryTools", () => {
       publish: false,
       smoke: true,
       pages: 2,
+      json: true,
     });
 
     expect(result.isError).toBeUndefined();
@@ -189,6 +200,7 @@ describe("registerLibraryTools", () => {
       concurrency: 2,
       case_timeout_ms: 45_000,
       require_full_docs: true,
+      json: true,
     });
 
     expect(result.isError).toBe(true);
@@ -208,6 +220,21 @@ describe("registerLibraryTools", () => {
     expect(report.smoke.local.every((item) => item.coverage_required)).toBe(true);
     expect(report.smoke.local.every((item) => item.coverage_passed === false)).toBe(true);
     expect(report.smoke.local[0]?.coverage_issues.join("; ")).toContain("Page budget was saturated");
+  });
+
+  it("returns compact verification text by default", async () => {
+    const tools = registerTools();
+    const verifyReadiness = tools.get("verify-readiness");
+    expect(verifyReadiness).toBeDefined();
+
+    const result = await verifyReadiness!({
+      publish: false,
+      source_readiness: false,
+    });
+
+    expect(result.content[0]?.text).toContain("Context verification:");
+    expect(result.content[0]?.text).toContain("Set json=true");
+    expect(() => JSON.parse(result.content[0]?.text ?? "{}")).toThrow();
   });
 
   it("registers embed-library and embedding-coverage tools", async () => {
@@ -267,6 +294,7 @@ describe("registerLibraryTools", () => {
     const first = await seedLibraries!({
       groups: ["llm"],
       limit: 1,
+      json: true,
     });
     expect(first.isError).toBeUndefined();
     const firstReport = JSON.parse(first.content[0]?.text ?? "{}") as {
@@ -286,6 +314,7 @@ describe("registerLibraryTools", () => {
     const second = await seedLibraries!({
       slugs: ["vercel-ai-sdk"],
       limit: 1,
+      json: true,
     });
     const secondReport = JSON.parse(second.content[0]?.text ?? "{}") as {
       added_count: number;
@@ -293,6 +322,22 @@ describe("registerLibraryTools", () => {
     };
     expect(secondReport.added_count).toBe(0);
     expect(secondReport.updated_count).toBe(1);
+  });
+
+  it("returns compact seed text by default", async () => {
+    const tools = registerTools();
+    const seedLibraries = tools.get("seed-libraries");
+    expect(seedLibraries).toBeDefined();
+
+    const result = await seedLibraries!({
+      groups: ["llm"],
+      limit: 1,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("Seed libraries: 1 selected");
+    expect(result.content[0]?.text).toContain("Set json=true");
+    expect(() => JSON.parse(result.content[0]?.text ?? "{}")).toThrow();
   });
 
   it("registers run-live-update-cycle and previews due docs", async () => {
@@ -311,6 +356,7 @@ describe("registerLibraryTools", () => {
       plan_only: true,
       native_only: true,
       max_pages: 1,
+      json: true,
     });
     expect(result.isError).toBeUndefined();
     const cycle = JSON.parse(result.content[0]?.text ?? "{}") as {
@@ -348,6 +394,7 @@ describe("registerLibraryTools", () => {
     const emitted = await testWebhook!({
       event: "docs.refreshed",
       payload: { source: "mcp-test" },
+      json: true,
     });
     expect(emitted.isError).toBeUndefined();
     const deliveries = JSON.parse(emitted.content[0]?.text ?? "[]") as Array<{ status: string; response_status: number }>;
@@ -356,7 +403,7 @@ describe("registerLibraryTools", () => {
     expect(deliveries[0]?.response_status).toBe(200);
     expect(received).toHaveLength(1);
 
-    const listed = await listDeliveries!({});
+    const listed = await listDeliveries!({ json: true });
     const listedDeliveries = JSON.parse(listed.content[0]?.text ?? "[]") as Array<{ event: string; status: string }>;
     expect(listedDeliveries[0]?.event).toBe("docs.refreshed");
     expect(listedDeliveries[0]?.status).toBe("delivered");

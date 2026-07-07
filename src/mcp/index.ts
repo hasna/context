@@ -27,6 +27,7 @@ import {
   type AiProviderId,
 } from "../ai/providers.js";
 import { getPublishReadinessReport } from "../publish/readiness.js";
+import { DEFAULT_LIST_LIMIT, takeWithMore } from "../cli/format.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
@@ -458,8 +459,10 @@ server.tool(
     repositoryPath: z.string().describe("Path to the repository"),
     filePath: z.string().describe("Path to the file to analyze"),
     depth: z.number().optional().default(2).describe("Traversal depth for related files"),
+    limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum entities, relationships per type, and related files to include"),
+    json: z.boolean().optional().default(false).describe("Return raw JSON"),
   },
-  async ({ repositoryPath, filePath, depth = 2 }) => {
+  async ({ repositoryPath, filePath, depth = 2, limit = DEFAULT_LIST_LIMIT, json = false }) => {
     try {
       const ctx = getContextByPath(repositoryPath);
       if (!ctx) {
@@ -486,6 +489,16 @@ server.tool(
       const file = matched;
       const entities = getCodeEntitiesByItem(file.id);
       const relations = getRelationsByItem(file.id);
+      const relatedFiles = getRelatedItems(file.id, depth);
+
+      if (json) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ file, entities, relations, relatedFiles }, null, 2),
+          }],
+        };
+      }
 
       let output = `# Relations for ${file.name}\n`;
       output += `Path: ${file.path}\n`;
@@ -493,9 +506,11 @@ server.tool(
 
       if (entities.length > 0) {
         output += `## Code Entities\n`;
-        for (const entity of entities) {
+        const { visible, remaining } = takeWithMore(entities, limit);
+        for (const entity of visible) {
           output += `- ${entity.type} ${entity.name} (lines ${entity.start_line}-${entity.end_line})\n`;
         }
+        if (remaining > 0) output += `- ...${remaining} more entities. Increase limit or use json=true for raw records.\n`;
         output += "\n";
       }
 
@@ -511,23 +526,23 @@ server.tool(
 
         for (const [type, rels] of byType) {
           output += `### ${type} (${rels.length})\n`;
-          for (const rel of rels.slice(0, 10)) {
+          const { visible, remaining } = takeWithMore(rels, limit);
+          for (const rel of visible) {
             output += `- ${rel.relation_text ?? type}\n`;
           }
-          if (rels.length > 10) {
-            output += `- ... and ${rels.length - 10} more\n`;
-          }
+          if (remaining > 0) output += `- ...${remaining} more. Increase limit or use json=true for raw records.\n`;
         }
       }
 
-      // Get related files
-      const relatedFiles = getRelatedItems(file.id, depth);
       if (relatedFiles.length > 0) {
         output += `\n## Related Files (${relatedFiles.length})\n`;
-        for (const { item: relatedFile, distance, relation } of relatedFiles.slice(0, 20)) {
+        const { visible, remaining } = takeWithMore(relatedFiles, limit);
+        for (const { item: relatedFile, distance, relation } of visible) {
           output += `- ${relatedFile.name} (distance: ${distance}, via: ${relation.relation_type})\n`;
         }
+        if (remaining > 0) output += `- ...${remaining} more related files. Increase limit or use json=true for raw records.\n`;
       }
+      output += "\nIncrease limit for more rows or set json=true for the full relation graph.";
 
       return { content: [{ type: "text", text: output }] };
     } catch (err) {
@@ -546,8 +561,9 @@ server.tool(
     repositoryPath: z.string().optional().describe("Path to the repository (optional, searches all if not provided)"),
     query: z.string().describe("Search query"),
     type: z.enum(["all", "files", "entities"]).optional().default("all").describe("What to search"),
+    limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Maximum files/entities per result group"),
   },
-  async ({ repositoryPath, query, type = "all" }) => {
+  async ({ repositoryPath, query, type = "all", limit = DEFAULT_LIST_LIMIT }) => {
     try {
       let ctxId: string | undefined;
       if (repositoryPath) {
@@ -567,10 +583,11 @@ server.tool(
         const files = searchContextItems(query, ctxId);
         if (files.length > 0) {
           results.push(`## Files matching "${query}" (${files.length})\n`);
-          for (const file of files.slice(0, 20)) {
+          const { visible, remaining } = takeWithMore(files, limit);
+          for (const file of visible) {
             results.push(`- ${file.path} (${file.line_count} lines)`);
           }
-          if (files.length > 20) results.push(`... and ${files.length - 20} more`);
+          if (remaining > 0) results.push(`...${remaining} more files. Increase limit for more rows.`);
         }
       }
 
@@ -578,10 +595,11 @@ server.tool(
         const entities = searchCodeEntities(query, ctxId);
         if (entities.length > 0) {
           results.push(`\n## Entities matching "${query}" (${entities.length})\n`);
-          for (const entity of entities.slice(0, 20)) {
+          const { visible, remaining } = takeWithMore(entities, limit);
+          for (const entity of visible) {
             results.push(`- ${entity.type} ${entity.name} in ${entity.item_id}`);
           }
-          if (entities.length > 20) results.push(`... and ${entities.length - 20} more`);
+          if (remaining > 0) results.push(`...${remaining} more entities. Increase limit for more rows.`);
         }
       }
 
