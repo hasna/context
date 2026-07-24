@@ -59,3 +59,4 @@ export * from "./ai/providers.js";
 export * from "./ai/docs-context.js";
 export * from "./indexer/index.js";
 export * from "./hooks/index.js";
+export * from "./v2/index.js";
